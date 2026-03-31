@@ -3,14 +3,14 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "$PROJECT_NAME"
+name = "ComfyUI-DazzleKSampler"
 dynamic = ["version"]
-description = "$DESCRIPTION"
+description = "A new project created from git-repokit-template"
 readme = "README.md"
 license = {text = "GPL-3.0-or-later"}
 requires-python = ">=3.10"
 authors = [
-    {name = "$GITHUB_USER", email = "$AUTHOR_EMAIL"},
+    {name = "djdarcy", email = "djdarcy@users.noreply.github.com"},
 ]
 keywords = []
 classifiers = [
@@ -36,19 +36,19 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/$GITHUB_ORG/$PROJECT_NAME"
-Repository = "https://github.com/$GITHUB_ORG/$PROJECT_NAME"
-Issues = "https://github.com/$GITHUB_ORG/$PROJECT_NAME/issues"
+Homepage = "https://github.com/DazzleNodes/ComfyUI-DazzleKSampler"
+Repository = "https://github.com/DazzleNodes/ComfyUI-DazzleKSampler"
+Issues = "https://github.com/DazzleNodes/ComfyUI-DazzleKSampler/issues"
 
 [project.scripts]
-$CLI_COMMAND = "$PACKAGE_NAME.cli:main"
+ComfyUI-DazzleKSampler = "ComfyUI_DazzleKSampler.cli:main"
 
 [tool.setuptools.dynamic]
-version = {attr = "$PACKAGE_NAME._version.PIP_VERSION"}
+version = {attr = "ComfyUI_DazzleKSampler._version.PIP_VERSION"}
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["$PACKAGE_NAME", "$PACKAGE_NAME.*"]
+include = ["ComfyUI_DazzleKSampler", "ComfyUI_DazzleKSampler.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -57,8 +57,8 @@ python_functions = "test_*"
 python_classes = "Test*"
 
 [tool.repokit-common]
-version-source = "$PACKAGE_NAME/_version.py"
+version-source = "ComfyUI_DazzleKSampler/_version.py"
 changelog = "CHANGELOG.md"
-repo-url = "https://github.com/$GITHUB_ORG/$PROJECT_NAME"
+repo-url = "https://github.com/DazzleNodes/ComfyUI-DazzleKSampler"
 tag-prefix = "v"
 private-patterns = ["private/", "local/", ".env"]

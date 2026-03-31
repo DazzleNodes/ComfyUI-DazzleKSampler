@@ -1,6 +1,6 @@
 """Tests for version module."""
 
-from $PACKAGE_NAME._version import (
+from ComfyUI_DazzleKSampler._version import (
     MAJOR, MINOR, PATCH, PHASE, PROJECT_PHASE,
     get_version, get_base_version, get_display_version, get_pip_version,
     __app_name__,
@@ -8,7 +8,7 @@ from $PACKAGE_NAME._version import (
 
 
 def test_app_name():
-    assert __app_name__ == "$PROJECT_NAME"
+    assert __app_name__ == "ComfyUI-DazzleKSampler"
 
 
 def test_version_components():

@@ -14,5 +14,5 @@ Structure:
 - .gitignore (repokit standard with private-content protection)
 - .repokit.json, CONTRIBUTING.md, LICENSE (GPL-3.0)
 
-Placeholder variables: $PROJECT_NAME, $PACKAGE_NAME, $DESCRIPTION,
-$GITHUB_ORG, $GITHUB_USER, $AUTHOR_EMAIL, $CLI_COMMAND
+Placeholder variables: ComfyUI-DazzleKSampler, ComfyUI_DazzleKSampler, A new project created from git-repokit-template,
+DazzleNodes, djdarcy, djdarcy@users.noreply.github.com, ComfyUI-DazzleKSampler

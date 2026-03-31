@@ -1,14 +1,14 @@
 # These owners will be the default owners for everything in
 # the repo. Unless a later match takes precedence,
-# $GITHUB_USER will be requested for review when someone opens a pull request.
-*       @$GITHUB_USER
+# djdarcy will be requested for review when someone opens a pull request.
+*       @djdarcy
 
 # Core implementation
-*.py    @$GITHUB_USER
+*.py    @djdarcy
 
 # Documentation
-/docs/   @$GITHUB_USER
-*.md     @$GITHUB_USER
+/docs/   @djdarcy
+*.md     @djdarcy
 
 # GitHub CI/CD
-/.github/ @$GITHUB_USER
+/.github/ @djdarcy
