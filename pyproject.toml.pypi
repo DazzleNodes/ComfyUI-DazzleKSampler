@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "$PROJECT_NAME"
+dynamic = ["version"]
+description = "$DESCRIPTION"
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+requires-python = ">=3.10"
+authors = [
+    {name = "$GITHUB_USER", email = "$AUTHOR_EMAIL"},
+]
+keywords = []
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Utilities",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/$GITHUB_ORG/$PROJECT_NAME"
+Repository = "https://github.com/$GITHUB_ORG/$PROJECT_NAME"
+Issues = "https://github.com/$GITHUB_ORG/$PROJECT_NAME/issues"
+
+[project.scripts]
+$CLI_COMMAND = "$PACKAGE_NAME.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "$PACKAGE_NAME._version.PIP_VERSION"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["$PACKAGE_NAME", "$PACKAGE_NAME.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+python_classes = "Test*"
+
+[tool.repokit-common]
+version-source = "$PACKAGE_NAME/_version.py"
+changelog = "CHANGELOG.md"
+repo-url = "https://github.com/$GITHUB_ORG/$PROJECT_NAME"
+tag-prefix = "v"
+private-patterns = ["private/", "local/", ".env"]
