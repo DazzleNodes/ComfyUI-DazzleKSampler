@@ -2,7 +2,7 @@
 
 Enhanced KSampler for ComfyUI with SmartResCalc noise passthrough and DazzleCommand integration. Part of the [DazzleNodes](https://github.com/DazzleNodes/DazzleNodes) collection.
 
-Based on [RES4LYF](https://github.com/ClownsharkBeta/RES4LYF)'s ClownsharKSampler sampling engine.
+Based on [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF)'s ClownsharKSampler sampling engine.
 
 ## Features
 
@@ -45,7 +45,7 @@ bash scripts/install-hooks.sh
 
 ## Acknowledgements
 
-This project is built on the sampling engine from [RES4LYF](https://github.com/ClownsharkBeta/RES4LYF) by ClownsharkBeta. The RK solver mathematics, noise generation system, and scheduler infrastructure are derived from that work.
+This project is built on the sampling engine from [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF) by ClownsharkBeta. The RK solver mathematics, noise generation system, and scheduler infrastructure are derived from that work.
 
 ## License
 
