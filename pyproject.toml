@@ -3,11 +3,11 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ComfyUI-DazzleKSampler"
-dynamic = ["version"]
-description = "A new project created from git-repokit-template"
+name = "comfyui-dazzle-ksampler"
+version = "0.1.0"
+description = "Enhanced KSampler for ComfyUI with SmartResCalc noise passthrough and DazzleCommand integration. Based on RES4LYF's ClownsharKSampler."
 readme = "README.md"
-license = {text = "GPL-3.0-or-later"}
+license = {text = "AGPL-3.0-or-later"}
 requires-python = ">=3.10"
 authors = [
     {name = "djdarcy", email = "djdarcy@users.noreply.github.com"},
