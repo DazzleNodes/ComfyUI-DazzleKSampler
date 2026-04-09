@@ -300,8 +300,8 @@ def sample_rk_beta(
     c2                          = EO("c2"                         , c2)
     c3                          = EO("c3"                         , c3)
 
-    tau_strength                = EO("tau_strength"               , tau_strength)
-    tau_mode                    = EO("tau_mode"                   , tau_mode)
+    tau_strength                = EO("tau_strength"               , 0.0)
+    tau_mode                    = EO("tau_mode"                   , "off")
     
     cfg_cw                      = EO("cfg_cw"                     , cfg_cw)
     
@@ -579,7 +579,9 @@ def sample_rk_beta(
 
     RK.update_transformer_options({"model_sampling": model.inner_model.inner_model.model_sampling})
     # BEGIN SAMPLING LOOP
-    
+
+    tau_complement_prev = None  # for temporal consistency check (Approach C)
+
     while step < num_steps:
         sigma, sigma_next = sigmas[step], sigmas[step+1]
         if sigma_next > sigma:
@@ -1922,22 +1924,69 @@ def sample_rk_beta(
                 eps = (x_0 - x_next) / (sigma - sigma_next)
                 denoised = x_0 - sigma * eps
 
-            # Tau complement: recover discarded information from denoising step
+            # ================================================================
+            # TAU COMPLEMENT: Recover structural information from denoising
+            # Based on the Tau Operator from D. Darcy's Scarcity Framework
+            # B: align complement with model's denoised prediction
+            # C: temporal consistency (structure persists, noise changes)
+            # ================================================================
             if tau_strength != 0.0 and tau_mode != "off":
                 import math as _math
-                complement = x_0 - x_next  # what denoising removed
+                import torch.nn.functional as _F
+
+                # Structural complement: gap between clean prediction and step result
+                complement = denoised - x_next
+
+                # --- Approach B: structural alignment ---
+                # cosine_similarity returns shape [B, H, W] from [B, C, H, W] inputs
+                # We need to unsqueeze back to [B, 1, H, W] for broadcasting
+                structural_alignment = _F.cosine_similarity(
+                    complement, denoised, dim=1
+                ).unsqueeze(1).clamp(0, 1)
+
+                # --- Approach C: temporal consistency ---
+                if tau_complement_prev is not None:
+                    temporal_consistency = _F.cosine_similarity(
+                        complement, tau_complement_prev, dim=1
+                    ).unsqueeze(1).clamp(0, 1)
+                else:
+                    temporal_consistency = torch.ones_like(structural_alignment)
+
+                # Combined mask: must pass BOTH checks
+                structural_mask = structural_alignment * temporal_consistency
+                structural_complement = complement * structural_mask
+
+                # Normalize to unit std, scale by x_next magnitude
+                sc_std = structural_complement.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+                sc_norm = structural_complement / sc_std
+                xn_std = x_next.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+
+                # Apply with mode-based scheduling
                 if tau_mode == "hard":
-                    x_next = x_next + tau_strength * complement
+                    x_next = x_next + tau_strength * xn_std * sc_norm
                 elif tau_mode == "soft":
-                    # More complement at low noise (detail phase)
                     progress = 1.0 - (sigma_next / sigma).clamp(0, 1)
-                    x_next = x_next + tau_strength * progress * complement
+                    x_next = x_next + tau_strength * progress * xn_std * sc_norm
                 elif tau_mode == "cosine":
                     progress = step / max(len(sigmas) - 2, 1)
                     weight = (1 - _math.cos(progress * _math.pi)) / 2
-                    x_next = x_next + tau_strength * weight * complement
+                    x_next = x_next + tau_strength * weight * xn_std * sc_norm
+
+                # Store for next step's temporal consistency check
+                tau_complement_prev = complement.clone().detach()
+
+                # Debug output
+                if step < 3 or step % 10 == 0:
+                    mask_mean = structural_mask.mean().item()
+                    sc_mag = structural_complement.abs().mean().item()
+                    print(f"[Tau] step={step} mask={mask_mean:.4f} "
+                          f"|sc|={sc_mag:.4f} |xn|={x_next.abs().mean().item():.4f} "
+                          f"mode={tau_mode} str={tau_strength}")
+
+                # Recompute dependent variables
                 eps = (x_0 - x_next) / (sigma - sigma_next)
                 denoised = x_0 - sigma * eps
+            # ================================================================
 
             x_0_prev = x_0.clone()
 

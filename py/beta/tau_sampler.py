@@ -19,6 +19,7 @@ from torch import Tensor
 from typing import Optional
 
 from .samplers import (
+    ClownsharKSampler_Beta,
     ClownSamplerAdvanced_Beta,
     SharkSampler,
     OptionsManager,
@@ -192,99 +193,37 @@ class TauSampler_Beta:
              **kwargs
              ):
 
-        options_mgr = OptionsManager(options, **kwargs)
-
         # Parse tau sampler name -> base sampler name
         base_sampler_name, is_tau = parse_tau_sampler_name(sampler_name)
 
-        # Override from options if provided
-        tau_strength = options_mgr.get('tau_strength', tau_strength)
-        tau_mode     = options_mgr.get('tau_mode', tau_mode)
-        eta          = options_mgr.get('eta', eta)
+        # Build extra_options with tau params
+        tau_extra = f"tau_strength={tau_strength}\ntau_mode={tau_mode}"
 
-        # Pass tau params via extra_options string (read by EO() in sample_rk_beta)
-        tau_extra_options = f"tau_strength={tau_strength}\ntau_mode={tau_mode}"
+        print(f"[TauSampler] base={base_sampler_name} tau_strength={tau_strength} "
+              f"tau_mode={tau_mode} bongmath={bongmath} eta={eta}")
 
-        # Handle chained inputs (same as ClownsharKSampler_Beta)
-        if latent_image is not None and 'positive' in latent_image and positive is None:
-            positive = latent_image['positive']
-        if latent_image is not None and 'negative' in latent_image and negative is None:
-            negative = latent_image['negative']
-        if latent_image is not None and 'model' in latent_image and model is None:
-            model = latent_image['model']
-
-        # Handle cascade models
-        noise_type_sde = "gaussian"
-        noise_type_sde_substep = "gaussian"
-        if model is not None and model.model.model_config.unet_config.get('stable_cascade_stage') == 'b':
-            noise_type_sde = "pyramid-cascade_B"
-            noise_type_sde_substep = "pyramid-cascade_B"
-
-        # Determine SDE mode based on sampler name
-        noise_mode_sde = "hard"
-        if "sde" in base_sampler_name:
-            noise_mode_sde = "hard"
-
-        # Build sampler via ClownSamplerAdvanced_Beta (reuse existing infrastructure)
-        sampler, = ClownSamplerAdvanced_Beta().main(
-            noise_type_sde                = noise_type_sde,
-            noise_type_sde_substep        = noise_type_sde_substep,
-            noise_mode_sde                = noise_mode_sde,
-            noise_mode_sde_substep        = noise_mode_sde,
-            eta                           = eta,
-            eta_substep                   = eta,
-            overshoot                     = 0.0,
-            overshoot_substep             = 0.0,
-            overshoot_mode                = "hard",
-            overshoot_mode_substep        = "hard",
-            momentum                      = 1.0,
-            alpha_sde                     = -1.0,
-            k_sde                         = 1.0,
-            cfgpp                         = 0.0,
-            c1                            = 0.0,
-            c2                            = 0.5,
-            c3                            = 1.0,
-            sampler_name                  = base_sampler_name,
-            implicit_sampler_name         = "use_explicit",
-            implicit_type                 = "bongmath",
-            implicit_type_substeps        = "bongmath",
-            implicit_steps                = 0,
-            implicit_substeps             = 0,
-            rescale_floor                 = True,
-            noise_seed_sde                = -1,
-            guides                        = guides,
-            options                       = options_mgr.as_dict(),
-            extra_options                 = tau_extra_options,
-            s_noise                       = 1.0,
-            s_noise_substep               = 1.0,
-            d_noise                       = 1.0,
-            d_noise_start_step            = 0,
-            d_noise_inv                   = 1.0,
-            d_noise_inv_start_step        = 0,
-            bongmath                      = bongmath,
-        )
-
-        # Run sampling via SharkSampler (reuse existing infrastructure)
-        output, denoised, sde_noise = SharkSampler().main(
+        # Delegate entirely to ClownsharKSampler_Beta -- it handles ALL param
+        # defaults, options merging, chained inputs, cascade detection, etc.
+        # We just override the sampler_name and inject tau extra_options.
+        output, denoised, options_out = ClownsharKSampler_Beta().main(
             model           = model,
-            cfg             = cfg,
-            scheduler       = scheduler,
-            steps           = steps,
-            steps_to_run    = steps_to_run,
             denoise         = denoise,
-            latent_image    = latent_image,
+            scheduler       = scheduler,
+            cfg             = cfg,
+            seed            = seed,
             positive        = positive,
             negative        = negative,
-            sampler         = sampler,
-            cfgpp           = 0.0,
-            noise_seed      = seed,
-            options         = options_mgr.as_dict(),
-            noise_type_init = "gaussian",
-            noise_stdev     = 1.0,
+            latent_image    = latent_image,
+            steps           = steps,
+            steps_to_run    = steps_to_run,
+            bongmath        = bongmath,
             sampler_mode    = sampler_mode,
-            denoise_alt     = 1.0,
+            eta             = eta,
+            sampler_name    = base_sampler_name,
             sigmas          = sigmas,
-            extra_options   = "",
+            guides          = guides,
+            options         = options,
+            extra_options   = tau_extra,
         )
 
-        return (output, denoised, options_mgr.as_dict(),)
+        return (output, denoised, options_out,)

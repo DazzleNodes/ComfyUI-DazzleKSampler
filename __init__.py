@@ -62,6 +62,38 @@ try:
         BongSampler,
     )
     from .py.beta.tau_sampler import TauSampler_Beta
+
+    # Register sample_rk_beta into ComfyUI's k_diffusion sampling namespace
+    # Must happen AFTER imports succeed (rk_sampler_beta is loaded as side effect)
+    # This is how RES4LYF does it: setattr(k_diffusion_sampling, "sample_rk_beta", func)
+    try:
+        import sys
+        import comfy.k_diffusion.sampling as _k_sampling
+        # Find our rk_sampler_beta module from sys.modules (already loaded by samplers.py)
+        _rk_mod = None
+        for _modname, _mod in sys.modules.items():
+            if 'dazzle-ksampler' in _modname and 'rk_sampler_beta' in _modname and hasattr(_mod, 'sample_rk_beta'):
+                _rk_mod = _mod
+                break
+            elif 'dazzle_ksampler' in _modname and 'rk_sampler_beta' in _modname and hasattr(_mod, 'sample_rk_beta'):
+                _rk_mod = _mod
+                break
+        if _rk_mod is not None:
+            if not hasattr(_k_sampling, 'sample_rk_beta'):
+                setattr(_k_sampling, 'sample_rk_beta', _rk_mod.sample_rk_beta)
+                print(f"[DazzleKSampler] Registered sample_rk_beta into k_diffusion.sampling")
+            else:
+                print(f"[DazzleKSampler] sample_rk_beta already registered (by RES4LYF?)")
+        else:
+            # Direct fallback: import the function we need
+            from .py.beta.rk_sampler_beta import sample_rk_beta
+            setattr(_k_sampling, 'sample_rk_beta', sample_rk_beta)
+            print(f"[DazzleKSampler] Registered sample_rk_beta (direct import)")
+    except Exception as e2:
+        print(f"[DazzleKSampler] WARNING: Failed to register sample_rk_beta: {e2}")
+        import traceback
+        traceback.print_exc()
+
     NODE_CLASS_MAPPINGS.update({
         "DazzleKSampler": ClownsharKSampler_Beta,
         "DazzleKSampler_Advanced": ClownSamplerAdvanced_Beta,
