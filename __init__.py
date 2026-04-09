@@ -61,6 +61,7 @@ try:
         ClownSampler_Beta,
         BongSampler,
     )
+    from .py.beta.tau_sampler import TauSampler_Beta
     NODE_CLASS_MAPPINGS.update({
         "DazzleKSampler": ClownsharKSampler_Beta,
         "DazzleKSampler_Advanced": ClownSamplerAdvanced_Beta,
@@ -68,6 +69,7 @@ try:
         "DazzleSharkSampler": SharkSampler_Beta,
         "DazzleClownSampler": ClownSampler_Beta,
         "DazzleBongSampler": BongSampler,
+        "DazzleTauSampler": TauSampler_Beta,
     })
 except Exception as e:
     print(f"[DazzleKSampler] ERROR loading sampler nodes: {e}")
@@ -91,6 +93,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DazzleSharkSampler": "Dazzle Shark Sampler (DazzleNodes)",
     "DazzleClownSampler": "Dazzle Clown Sampler (DazzleNodes)",
     "DazzleBongSampler": "Dazzle Bong Sampler (DazzleNodes)",
+    "DazzleTauSampler": "Dazzle TauSampler (DazzleNodes)",
 }
 
 _load_ok = len(NODE_CLASS_MAPPINGS) > 0

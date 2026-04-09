@@ -1141,8 +1141,6 @@ class ClownSamplerAdvanced_Beta:
             eta_substep                   : float = 0.5,
             momentum                      : float = 0.0,
 
-
-
             noise_scaling_weight          : float = 0.0,
             noise_scaling_type            : str   = "sampler",
             noise_scaling_mode            : str   = "linear",

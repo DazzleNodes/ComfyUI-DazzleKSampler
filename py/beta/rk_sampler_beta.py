@@ -168,7 +168,6 @@ def sample_rk_beta(
         
         momentum                      : float              =  0.0,
 
-
         overshoot_mode                : str                = "hard",
         overshoot_mode_substep        : str                = "hard",
         overshoot                     : float              =  0.0,
@@ -300,6 +299,9 @@ def sample_rk_beta(
     c1                          = EO("c1"                         , c1)
     c2                          = EO("c2"                         , c2)
     c3                          = EO("c3"                         , c3)
+
+    tau_strength                = EO("tau_strength"               , tau_strength)
+    tau_mode                    = EO("tau_mode"                   , tau_mode)
     
     cfg_cw                      = EO("cfg_cw"                     , cfg_cw)
     
@@ -1915,11 +1917,28 @@ def sample_rk_beta(
 
             if EO("data_sampler") and step > EO("data_sampler_start_step", 0) and step < EO("data_sampler_end_step", 5):
                 data_sampler_weight = EO("data_sampler_weight", 1.0)
-                denoised_step = RK.zum(row+RK.row_offset+RK.multistep_stages, data_, data_prev_) 
+                denoised_step = RK.zum(row+RK.row_offset+RK.multistep_stages, data_, data_prev_)
                 x_next = LG.swap_data(x_next, denoised, denoised_step, data_sampler_weight * sigma_next)
                 eps = (x_0 - x_next) / (sigma - sigma_next)
                 denoised = x_0 - sigma * eps
-            
+
+            # Tau complement: recover discarded information from denoising step
+            if tau_strength != 0.0 and tau_mode != "off":
+                import math as _math
+                complement = x_0 - x_next  # what denoising removed
+                if tau_mode == "hard":
+                    x_next = x_next + tau_strength * complement
+                elif tau_mode == "soft":
+                    # More complement at low noise (detail phase)
+                    progress = 1.0 - (sigma_next / sigma).clamp(0, 1)
+                    x_next = x_next + tau_strength * progress * complement
+                elif tau_mode == "cosine":
+                    progress = step / max(len(sigmas) - 2, 1)
+                    weight = (1 - _math.cos(progress * _math.pi)) / 2
+                    x_next = x_next + tau_strength * weight * complement
+                eps = (x_0 - x_next) / (sigma - sigma_next)
+                denoised = x_0 - sigma * eps
+
             x_0_prev = x_0.clone()
 
             x_means_per_step = x_next.mean(dim=(-2,-1), keepdim=True)
