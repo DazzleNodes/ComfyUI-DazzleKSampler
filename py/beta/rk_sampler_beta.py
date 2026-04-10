@@ -1933,9 +1933,10 @@ def sample_rk_beta(
             #   tau1: Raw complement (noise vs coherence) -- original v1
             #   tau2: B+C structural filtering (cosine alignment + temporal)
             #   tau3: Seed-variant perturbation generator (see block below)
+            #   tau4: Spectral per-bin complement (frequency-domain orthogonal)
             #
             # Range compression: tau_strength 0-1 maps to effective 0-0.12
-            # for tau1/tau2. tau3 uses the full 0-1 range since its
+            # for tau1/tau2/tau4. tau3 uses the full 0-1 range since its
             # perturbation source is already at floating-point scale.
             # ================================================================
             if tau_strength != 0.0 and tau_mode != "off":
@@ -2092,8 +2093,166 @@ def sample_rk_beta(
                               f"|xn|={x_next.abs().mean().item():.4f} "
                               f"mode={tau_mode} str={tau3_strength:.4f}")
 
-                # Recompute eps/denoised for tau1/tau2 (they made a real
-                # change to x_next). For tau3, the perpendicular is
+                elif tau_version == "tau4":
+                    # ---- TAU4: Spectral per-bin complement (band-relative z-score) ----
+                    # Inject denoised's phase at frequency bins that are
+                    # OUTLIERS within their own radial frequency band -- bins
+                    # where the denoiser's prediction has unusually high
+                    # structural content relative to what the current step
+                    # delta is resolving.
+                    #
+                    # Previous version (v1) used global `ratio / ratio_max`
+                    # normalization, which was monopolized by the DC/
+                    # low-frequency bins because natural images have 1/f
+                    # spectra. That produced a low-pass filter effect (image
+                    # slightly smoothed, like tau1).
+                    #
+                    # This version (v2) bins frequencies into N_BANDS radial
+                    # shells, computes the mean and std of log(E_d/E_s)
+                    # within each band, and z-scores each bin against its
+                    # own band. Positive z-scores identify bins that are
+                    # surprisingly structured RELATIVE TO THEIR NEIGHBORS in
+                    # frequency space -- stripping out the 1/f baseline.
+                    #
+                    # Reference: SmartResCalc spectral_noise_blend per_bin_normalize
+                    # at C:\code\smart-resolution-calc-repo\github\py\noise_utils.py:158-244
+
+                    # FFT to frequency domain (operates on spatial H, W dims)
+                    # rfft2 exploits Hermitian symmetry: output shape ends in W//2+1
+                    F_denoised = torch.fft.rfft2(denoised, dim=(-2, -1))
+                    F_step = torch.fft.rfft2(x_0 - x_next, dim=(-2, -1))
+                    F_xn = torch.fft.rfft2(x_next, dim=(-2, -1))
+
+                    # Per-bin amplitude
+                    amp_denoised = F_denoised.abs()
+                    amp_step = F_step.abs()
+
+                    # Reduce over all leading dims (B, C, and T for 5D video
+                    # latents like Qwen/Wan) to get a per-spatial-freq map.
+                    # Force to float32 for numerical stability -- Qwen and
+                    # other models use bfloat16, which has ~3 digits of
+                    # precision and chokes on the wide dynamic range of
+                    # spectral energies (low-freq can be 1e8, high-freq 1e4).
+                    leading_dims = tuple(range(amp_denoised.ndim - 2))
+                    e_d_avg = (amp_denoised.float() ** 2).mean(dim=leading_dims)  # (H, W//2+1)
+                    e_s_avg = (amp_step.float() ** 2).mean(dim=leading_dims)
+
+                    # Log-ratio: compresses the wide dynamic range
+                    eps_denom = 1e-6
+                    log_ratio_avg = torch.log(
+                        (e_d_avg / (e_s_avg + eps_denom)).clamp(min=eps_denom)
+                    )  # float32, (H, W//2+1)
+
+                    # Build radial frequency grid
+                    H_sp = denoised.shape[-2]
+                    W_sp = denoised.shape[-1]
+                    freq_h = torch.fft.fftfreq(H_sp, device=denoised.device, dtype=torch.float32)
+                    freq_w = torch.fft.rfftfreq(W_sp, device=denoised.device, dtype=torch.float32)
+                    Fu, Fv = torch.meshgrid(freq_h, freq_w, indexing="ij")
+                    radial = torch.sqrt(Fu ** 2 + Fv ** 2)  # (H, W//2+1)
+
+                    # Bin into N_BANDS radial shells (reference: Nyquist = 0.5)
+                    N_BANDS = 16
+                    band_idx = (radial / 0.5 * N_BANDS).long().clamp(0, N_BANDS - 1)
+
+                    # Compute per-band mean and std of log-ratio
+                    # (one-pass: tally sum, sumsq, count per band)
+                    band_sum = torch.zeros(N_BANDS, device=denoised.device, dtype=torch.float32)
+                    band_sumsq = torch.zeros(N_BANDS, device=denoised.device, dtype=torch.float32)
+                    band_count = torch.zeros(N_BANDS, device=denoised.device, dtype=torch.float32)
+                    band_sum.scatter_add_(0, band_idx.flatten(), log_ratio_avg.flatten())
+                    band_sumsq.scatter_add_(0, band_idx.flatten(), (log_ratio_avg ** 2).flatten())
+                    band_count.scatter_add_(0, band_idx.flatten(), torch.ones_like(log_ratio_avg).flatten())
+                    band_count = band_count.clamp(min=1.0)
+                    band_mean = band_sum / band_count
+                    band_var = (band_sumsq / band_count) - band_mean ** 2
+                    band_std = band_var.clamp(min=1e-8).sqrt()
+
+                    # Z-score each bin against its own radial band
+                    z_score_2d = (log_ratio_avg - band_mean[band_idx]) / band_std[band_idx]
+
+                    # Mask: clamp positive z-scores, normalize by a 3-sigma ceiling
+                    # (everything above +3 sigma is a strong outlier = mask=1.0)
+                    mask_2d = z_score_2d.clamp(0, 3.0) / 3.0  # (H, W//2+1) in [0, 1]
+
+                    # Per-bin normalize: use x_next's magnitude, denoised's phase
+                    # (SmartResCalc's per_bin trick -- phase-only transfer keeps
+                    # spectral scale sane across resolutions)
+                    xn_magnitude = F_xn.abs()
+                    denoised_phase = torch.angle(F_denoised)
+                    F_injection = xn_magnitude * torch.exp(1j * denoised_phase)
+
+                    # Broadcast mask_2d (H, W//2+1) to F_injection's full shape
+                    # via implicit broadcasting (align from right)
+                    F_complement = mask_2d * F_injection
+
+                    # IFFT back to spatial domain
+                    spectral_complement = torch.fft.irfft2(
+                        F_complement, s=(H_sp, W_sp), dim=(-2, -1)
+                    )
+
+                    # Normalize to x_next scale (SmartResCalc safety step)
+                    sc_std = spectral_complement.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+                    sc_norm = spectral_complement / sc_std
+                    xn_std = x_next.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+
+                    # Mode-specific strength rescaling for tau4.
+                    # Hard mode applies the full per-step strength at every
+                    # step, so the total injected perturbation is
+                    # MAX_EFFECTIVE * n_steps. Without a smaller cap, str=1.0
+                    # hard mode compounds to ~230% of x_next std across 19
+                    # steps, destabilizing the sampler (empirically observed).
+                    # Soft/cosine modes attenuate via progress scaling, so
+                    # they can safely use the full 0.12 range.
+                    if tau_mode == "hard":
+                        tau4_strength = effective_strength * 0.25  # 0.12 -> 0.03
+                        x_next = x_next + tau4_strength * xn_std * sc_norm
+                    elif tau_mode == "soft":
+                        progress = 1.0 - (sigma_next / sigma).clamp(0, 1)
+                        x_next = x_next + effective_strength * progress * xn_std * sc_norm
+                    elif tau_mode == "cosine":
+                        progress = step / max(len(sigmas) - 2, 1)
+                        weight = (1 - _math.cos(progress * _math.pi)) / 2
+                        x_next = x_next + effective_strength * weight * xn_std * sc_norm
+
+                    # ---- Debug instrumentation ----
+                    if step < 3 or step % 10 == 0:
+                        mask_cov = mask_2d.mean().item()
+                        mask_max = mask_2d.max().item()
+                        nonzero = (mask_2d > 0.01).float().mean().item()
+                        sc_mag = spectral_complement.abs().mean().item()
+                        e_d_total = e_d_avg.mean().item()
+                        e_s_total = e_s_avg.mean().item()
+                        global_ratio = e_d_total / (e_s_total + 1e-8)
+                        print(f"[Tau4] step={step} mask_cov={mask_cov:.3f} "
+                              f"mask_max={mask_max:.3f} nonzero={nonzero:.3f} "
+                              f"|sc|={sc_mag:.4f} E_d/E_s={global_ratio:.2e} "
+                              f"|xn|={x_next.abs().mean().item():.4f} "
+                              f"mode={tau_mode} eff_str={effective_strength:.4f}")
+
+                    # Per-band debug at step 0: band-wise mean, std, z-max, mask stats
+                    if step == 0:
+                        print(f"[Tau4-bands] step=0 latent_shape={tuple(amp_denoised.shape)} "
+                              f"band-relative log-ratio z-score:")
+                        for _b in range(N_BANDS):
+                            _bm = (band_idx == _b)
+                            _count = _bm.sum().item()
+                            if _count == 0:
+                                continue
+                            _band_zs = z_score_2d[_bm]
+                            _band_mask = mask_2d[_bm]
+                            _low = _b / N_BANDS * 0.5
+                            _high = (_b + 1) / N_BANDS * 0.5
+                            print(f"  band {_b:2d} [{_low:.3f}-{_high:.3f}] "
+                                  f"n={_count:5d} "
+                                  f"log_r_mean={band_mean[_b].item():+.2f} "
+                                  f"log_r_std={band_std[_b].item():.2f} "
+                                  f"z_max={_band_zs.max().item():+.2f} "
+                                  f"mask_mean={_band_mask.mean().item():.3f} "
+                                  f"mask_max={_band_mask.max().item():.3f}")
+
+                # Recompute eps/denoised for tau1/tau2/tau4 (they made real
+                # changes to x_next). For tau3, the perpendicular is
                 # ~1e-16 and recomputing eps/denoised from that residual
                 # is both wasted work and a source of additional FP drift,
                 # so we skip it and let the tau3 path contribute only
