@@ -283,7 +283,7 @@ class SharkSampler:
 
             
             if not EO("disable_dummy_sampler_init"):
-                sampler_null = comfy.samplers.ksampler("rk_beta", 
+                sampler_null = comfy.samplers.ksampler("dazzle_rk_beta", 
                     {
                         "sampler_mode": "NULL",
                     })
@@ -1320,7 +1320,7 @@ class ClownSamplerAdvanced_Beta:
                 sde_noise = normalize_zscore(sde_noise, channelwise=True, inplace=True)
 
 
-            sampler = comfy.samplers.ksampler("rk_beta", 
+            sampler = comfy.samplers.ksampler("dazzle_rk_beta", 
                 {
                     "eta"                           : eta,
                     "eta_substep"                   : eta_substep,
