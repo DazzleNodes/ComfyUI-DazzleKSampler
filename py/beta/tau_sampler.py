@@ -141,8 +141,10 @@ class TauSampler_Beta:
                                            "tooltip": "Noise seed. -2 = use input latent as noise pattern."}),
                 "sampler_mode": (['unsample', 'standard', 'resample'], {"default": "standard"}),
                 "bongmath":     ("BOOLEAN", {"default": True}),
-                "tau_strength": ("FLOAT", {"default": 0.2, "min": -2.0,   "max": 2.0,   "step": 0.01, "round": False,
-                                           "tooltip": "Tau complement strength. How much discarded information to recover. 0 = standard sampling."}),
+                "tau_version":  (["tau1", "tau2", "tau3"], {"default": "tau2",
+                                           "tooltip": "tau1 = raw complement (noise vs coherence). tau2 = B+C structural filtering (alignment + temporal). tau3 = seed-variant perturbation: same seed, slight structural variations via FP-noise amplification through ODE chaos sensitivity. Use tau3 to explore small variations of an image without re-rolling the seed."}),
+                "tau_strength": ("FLOAT", {"default": 0.5, "min": 0.0,    "max": 1.0,   "step": 0.01, "round": False,
+                                           "tooltip": "Tau complement strength (0-1 range, internally mapped to effective 0-0.12). 0 = standard sampling."}),
                 "tau_mode":     (["hard", "soft", "cosine"], {"default": "soft",
                                            "tooltip": "hard = fixed strength every step. soft = more complement at low noise (detail phase). cosine = smooth ramp."}),
             },
@@ -185,7 +187,8 @@ class TauSampler_Beta:
              sampler_name                  : str                    = "tau/res_2m",
              sampler_mode                  : str                    = "standard",
              bongmath                      : bool                   = True,
-             tau_strength                  : float                  = 0.2,
+             tau_version                   : str                    = "tau2",
+             tau_strength                  : float                  = 0.5,
              tau_mode                      : str                    = "soft",
              sigmas                        : Optional[Tensor]       = None,
              guides                                                 = None,
@@ -197,10 +200,14 @@ class TauSampler_Beta:
         base_sampler_name, is_tau = parse_tau_sampler_name(sampler_name)
 
         # Build extra_options with tau params
-        tau_extra = f"tau_strength={tau_strength}\ntau_mode={tau_mode}"
+        tau_extra = f"tau_strength={tau_strength}\ntau_mode={tau_mode}\ntau_version={tau_version}"
 
-        print(f"[TauSampler] base={base_sampler_name} tau_strength={tau_strength} "
-              f"tau_mode={tau_mode} bongmath={bongmath} eta={eta}")
+        # Effective strength: tau1/tau2 are range-compressed to 0-0.12;
+        # tau3 uses the full 0-1 range (its perturbation is FP-scale anyway).
+        eff_str = tau_strength if tau_version == "tau3" else tau_strength * 0.12
+        print(f"[TauSampler] base={base_sampler_name} v={tau_version} "
+              f"str={tau_strength} (eff={eff_str:.4f}) "
+              f"mode={tau_mode} bongmath={bongmath} eta={eta}")
 
         # Delegate entirely to ClownsharKSampler_Beta -- it handles ALL param
         # defaults, options merging, chained inputs, cascade detection, etc.

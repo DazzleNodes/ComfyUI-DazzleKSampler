@@ -302,6 +302,7 @@ def sample_rk_beta(
 
     tau_strength                = EO("tau_strength"               , 0.0)
     tau_mode                    = EO("tau_mode"                   , "off")
+    tau_version                 = EO("tau_version"                , "tau2")
     
     cfg_cw                      = EO("cfg_cw"                     , cfg_cw)
     
@@ -1927,65 +1928,181 @@ def sample_rk_beta(
             # ================================================================
             # TAU COMPLEMENT: Recover structural information from denoising
             # Based on the Tau Operator from D. Darcy's Scarcity Framework
-            # B: align complement with model's denoised prediction
-            # C: temporal consistency (structure persists, noise changes)
+            #
+            # Versions:
+            #   tau1: Raw complement (noise vs coherence) -- original v1
+            #   tau2: B+C structural filtering (cosine alignment + temporal)
+            #   tau3: Seed-variant perturbation generator (see block below)
+            #
+            # Range compression: tau_strength 0-1 maps to effective 0-0.12
+            # for tau1/tau2. tau3 uses the full 0-1 range since its
+            # perturbation source is already at floating-point scale.
             # ================================================================
             if tau_strength != 0.0 and tau_mode != "off":
                 import math as _math
                 import torch.nn.functional as _F
 
-                # Structural complement: gap between clean prediction and step result
-                complement = denoised - x_next
+                # Range compression: map 0-1 slider to 0-0.12 effective strength
+                MAX_EFFECTIVE = 0.12
+                effective_strength = tau_strength * MAX_EFFECTIVE
 
-                # --- Approach B: structural alignment ---
-                # cosine_similarity returns shape [B, H, W] from [B, C, H, W] inputs
-                # We need to unsqueeze back to [B, 1, H, W] for broadcasting
-                structural_alignment = _F.cosine_similarity(
-                    complement, denoised, dim=1
-                ).unsqueeze(1).clamp(0, 1)
+                if tau_version == "tau1":
+                    # ---- TAU1: Raw complement (noise vs coherence) ----
+                    # Original v1: complement = x_0 - x_next (everything removed)
+                    # Normalized to prevent scale mismatch
+                    complement = x_0 - x_next
+                    sc_std = complement.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+                    sc_norm = complement / sc_std
+                    xn_std = x_next.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
 
-                # --- Approach C: temporal consistency ---
-                if tau_complement_prev is not None:
-                    temporal_consistency = _F.cosine_similarity(
-                        complement, tau_complement_prev, dim=1
+                    if tau_mode == "hard":
+                        x_next = x_next + effective_strength * xn_std * sc_norm
+                    elif tau_mode == "soft":
+                        progress = 1.0 - (sigma_next / sigma).clamp(0, 1)
+                        x_next = x_next + effective_strength * progress * xn_std * sc_norm
+                    elif tau_mode == "cosine":
+                        progress = step / max(len(sigmas) - 2, 1)
+                        weight = (1 - _math.cos(progress * _math.pi)) / 2
+                        x_next = x_next + effective_strength * weight * xn_std * sc_norm
+
+                    if step < 3 or step % 10 == 0:
+                        print(f"[Tau1] step={step} |comp|={complement.abs().mean().item():.4f} "
+                              f"|xn|={x_next.abs().mean().item():.4f} "
+                              f"mode={tau_mode} eff_str={effective_strength:.4f}")
+
+                elif tau_version == "tau2":
+                    # ---- TAU2: B+C structural filtering ----
+                    # Complement = denoised - x_next (noise-free structural gap)
+                    # B: cosine similarity alignment with denoised
+                    # C: temporal consistency across steps
+                    complement = denoised - x_next
+
+                    structural_alignment = _F.cosine_similarity(
+                        complement, denoised, dim=1
                     ).unsqueeze(1).clamp(0, 1)
+
+                    if tau_complement_prev is not None:
+                        temporal_consistency = _F.cosine_similarity(
+                            complement, tau_complement_prev, dim=1
+                        ).unsqueeze(1).clamp(0, 1)
+                    else:
+                        temporal_consistency = torch.ones_like(structural_alignment)
+
+                    structural_mask = structural_alignment * temporal_consistency
+                    structural_complement = complement * structural_mask
+
+                    sc_std = structural_complement.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+                    sc_norm = structural_complement / sc_std
+                    xn_std = x_next.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+
+                    if tau_mode == "hard":
+                        x_next = x_next + effective_strength * xn_std * sc_norm
+                    elif tau_mode == "soft":
+                        progress = 1.0 - (sigma_next / sigma).clamp(0, 1)
+                        x_next = x_next + effective_strength * progress * xn_std * sc_norm
+                    elif tau_mode == "cosine":
+                        progress = step / max(len(sigmas) - 2, 1)
+                        weight = (1 - _math.cos(progress * _math.pi)) / 2
+                        x_next = x_next + effective_strength * weight * xn_std * sc_norm
+
+                    tau_complement_prev = complement.clone().detach()
+
+                    if step < 3 or step % 10 == 0:
+                        mask_mean = structural_mask.mean().item()
+                        print(f"[Tau2] step={step} mask={mask_mean:.4f} "
+                              f"|sc|={structural_complement.abs().mean().item():.4f} "
+                              f"|xn|={x_next.abs().mean().item():.4f} "
+                              f"mode={tau_mode} eff_str={effective_strength:.4f}")
+
+                elif tau_version == "tau3":
+                    # ---- TAU3: Seed-variant perturbation generator ----
+                    #
+                    # ORIGINAL INTENT (did not work as expected):
+                    # Compute the "road not taken" as the component of
+                    # (denoised - x_next) orthogonal to the denoising direction
+                    # (x_0 - x_next). The theory: the parallel component is
+                    # "more/less denoising" (dilution), and the perpendicular
+                    # is structural information the sampler ignored.
+                    #
+                    # EMPIRICAL REALITY:
+                    # For RK samplers, (denoised - x_next) and (x_0 - x_next)
+                    # are both scalar multiples of the same eps vector, so
+                    # they are colinear by construction. The perpendicular
+                    # projection is mathematically zero, surviving only as
+                    # floating-point residual (~1e-16).
+                    #
+                    # The `perp_std.clamp(min=1e-8)` below then rescues that
+                    # FP residual by 8 orders of magnitude, normalizing it
+                    # to unit scale. What gets injected into x_next is
+                    # effectively structured floating-point noise at
+                    # ~1e-8 * xn_std per step. Across 19 nonlinear solver
+                    # steps, ODE sensitivity compounds this into a visibly
+                    # distinct but COHERENT image.
+                    #
+                    # USEFUL BEHAVIOR:
+                    # tau3 functions as a "same seed, slight variation"
+                    # generator. The output is structurally similar to
+                    # tau1/tau2 at strength=0 (same composition, same subject)
+                    # but with small detail-level differences -- useful for
+                    # exploring variations without re-rolling the seed.
+                    # At strength=0 it is byte-identical to tau1/tau2 at
+                    # strength=0 (no-op). At higher strengths, more divergence.
+                    complement = denoised - x_next
+                    denoising_dir = x_0 - x_next
+
+                    # Normalize denoising direction (for the projection math,
+                    # even though the result is ~zero for RK samplers)
+                    dn_norm = denoising_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
+                    d_hat = denoising_dir / dn_norm
+
+                    # Project complement onto denoising direction
+                    parallel_magnitude = (complement * d_hat).sum(dim=1, keepdim=True)
+                    parallel = parallel_magnitude * d_hat
+                    perpendicular = complement - parallel  # ~1e-16 for RK
+
+                    # The clamp below is what makes tau3 do anything at all:
+                    # it amplifies the 1e-16 FP residual to 1e-8, which then
+                    # gets scaled by xn_std and tau3_strength and injected.
+                    perp_std = perpendicular.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+                    perp_norm = perpendicular / perp_std
+                    xn_std = x_next.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+
+                    # tau3 uses full 0-1 range (no 0.12 compression) because
+                    # the injected magnitude is already at FP-noise scale.
+                    # Even at strength=1.0, the actual perturbation is tiny --
+                    # the visible effect comes from ODE chaos amplification.
+                    tau3_strength = tau_strength  # full range, not compressed
+
+                    if tau_mode == "hard":
+                        x_next = x_next + tau3_strength * xn_std * perp_norm
+                    elif tau_mode == "soft":
+                        progress = 1.0 - (sigma_next / sigma).clamp(0, 1)
+                        x_next = x_next + tau3_strength * progress * xn_std * perp_norm
+                    elif tau_mode == "cosine":
+                        progress = step / max(len(sigmas) - 2, 1)
+                        weight = (1 - _math.cos(progress * _math.pi)) / 2
+                        x_next = x_next + tau3_strength * weight * xn_std * perp_norm
+
+                    if step < 3 or step % 10 == 0:
+                        perp_mag = perpendicular.abs().mean().item()
+                        para_mag = parallel.abs().mean().item()
+                        ratio = perp_mag / (para_mag + 1e-8)
+                        print(f"[Tau3] step={step} |perp|={perp_mag:.2e} |para|={para_mag:.4f} "
+                              f"ratio={ratio:.2e} perp_std={perp_std.mean().item():.2e} "
+                              f"|xn|={x_next.abs().mean().item():.4f} "
+                              f"mode={tau_mode} str={tau3_strength:.4f}")
+
+                # Recompute eps/denoised for tau1/tau2 (they made a real
+                # change to x_next). For tau3, the perpendicular is
+                # ~1e-16 and recomputing eps/denoised from that residual
+                # is both wasted work and a source of additional FP drift,
+                # so we skip it and let the tau3 path contribute only
+                # through the direct x_next perturbation.
+                if tau_version == "tau3" and perpendicular.abs().max().item() < 1e-10:
+                    pass  # skip recompute -- tau3 has no meaningful eps/denoised change
                 else:
-                    temporal_consistency = torch.ones_like(structural_alignment)
-
-                # Combined mask: must pass BOTH checks
-                structural_mask = structural_alignment * temporal_consistency
-                structural_complement = complement * structural_mask
-
-                # Normalize to unit std, scale by x_next magnitude
-                sc_std = structural_complement.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
-                sc_norm = structural_complement / sc_std
-                xn_std = x_next.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
-
-                # Apply with mode-based scheduling
-                if tau_mode == "hard":
-                    x_next = x_next + tau_strength * xn_std * sc_norm
-                elif tau_mode == "soft":
-                    progress = 1.0 - (sigma_next / sigma).clamp(0, 1)
-                    x_next = x_next + tau_strength * progress * xn_std * sc_norm
-                elif tau_mode == "cosine":
-                    progress = step / max(len(sigmas) - 2, 1)
-                    weight = (1 - _math.cos(progress * _math.pi)) / 2
-                    x_next = x_next + tau_strength * weight * xn_std * sc_norm
-
-                # Store for next step's temporal consistency check
-                tau_complement_prev = complement.clone().detach()
-
-                # Debug output
-                if step < 3 or step % 10 == 0:
-                    mask_mean = structural_mask.mean().item()
-                    sc_mag = structural_complement.abs().mean().item()
-                    print(f"[Tau] step={step} mask={mask_mean:.4f} "
-                          f"|sc|={sc_mag:.4f} |xn|={x_next.abs().mean().item():.4f} "
-                          f"mode={tau_mode} str={tau_strength}")
-
-                # Recompute dependent variables
-                eps = (x_0 - x_next) / (sigma - sigma_next)
-                denoised = x_0 - sigma * eps
+                    eps = (x_0 - x_next) / (sigma - sigma_next)
+                    denoised = x_0 - sigma * eps
             # ================================================================
 
             x_0_prev = x_0.clone()
