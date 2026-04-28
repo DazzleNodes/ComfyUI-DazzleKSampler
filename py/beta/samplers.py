@@ -21,6 +21,7 @@ from ..helper               import initialize_or_scale, get_res4lyf_scheduler_li
 from ..res4lyf              import RESplain
 from ..latents              import normalize_zscore, get_orthogonal
 from ..sigmas               import get_sigmas
+from ._latent_noise_protocol import resolve_latent_as_noise
 #import ..models              # import ReFluxPatcher
 
 from .constants             import MAX_STEPS, IMPLICIT_TYPE_NAMES
@@ -543,26 +544,34 @@ class SharkSampler:
 
                 for total_steps_iter in range (sde_noise_steps):
                         
-                    # Latent-as-noise passthrough: use the input latent directly as
-                    # initial noise instead of generating from seed.
-                    # Conditions:
-                    # 1. The latent has use_as_noise flag (set by upstream nodes like SmartResCalc)
-                    # 2. seed==-2 (explicit opt-in — won't activate by accident)
-                    # Special seed -2 means "use input latent as noise" (outside rgthree's
-                    # -1=random range; -2 is unused by ClownsharKSampler natively).
+                    # Latent-as-noise passthrough via the four-shape latent-dict protocol.
+                    # See py/beta/_latent_noise_protocol.py for the contract.
+                    #
+                    # Activates when:
+                    #   - The latent has use_as_noise=True (set by upstream nodes like SmartResCalc), AND
+                    #   - noise_seed == -2 (explicit opt-in; -2 is outside rgthree's -1=random range
+                    #     and is unused by ClownsharKSampler natively)
+                    #
+                    # Behavior (resolved inside the helper):
+                    #   Shape B (use_as_noise, no "noise" key)
+                    #     → noise = samples; init = zeros (samples acts purely as noise)
+                    #   Shape C (use_as_noise + "noise" key)
+                    #     → noise = latent["noise"]; init = samples (img2img + img2noise)
+                    #   Shapes A / D (no use_as_noise)
+                    #     → falls through to seed-driven noise generation below
+                    #
                     # Works at any denoise level — user controls influence via denoise amount.
                     use_latent_as_noise = latent_unbatch.get("use_as_noise", False)
                     if use_latent_as_noise or noise_seed == -2:
                         print(f"[ClownsharKSampler] Noise check: use_as_noise={use_latent_as_noise}, noise_seed={noise_seed}, both_met={use_latent_as_noise and noise_seed == -2}")
-                    if use_latent_as_noise and noise_seed == -2:
-                        if "noise" in latent_unbatch:
-                            # Use provided shaped noise (e.g., from img2img+img2noise)
-                            noise = latent_unbatch["noise"].to(device=x.device, dtype=x.dtype)
+
+                    _proto_noise, x, _proto_shape = resolve_latent_as_noise(latent_unbatch, x, noise_seed)
+                    if _proto_noise is not None:
+                        noise = _proto_noise
+                        if _proto_shape == "shape_c":
                             print(f"[ClownsharKSampler] Using provided shaped noise (noise key, noise_mean={noise.mean():.6f}, noise_std={noise.std():.6f})")
-                        else:
-                            # Fallback: use samples tensor as noise (e.g., from noise-only latent)
-                            noise = x.clone()
-                            print(f"[ClownsharKSampler] Using input latent as noise (use_as_noise={use_latent_as_noise}, noise_seed={noise_seed}, latent_mean={x.mean():.6f}, latent_std={x.std():.6f})")
+                        else:  # shape_b
+                            print(f"[ClownsharKSampler] Using input latent as noise -- init zeroed (noise_mean={noise.mean():.6f}, noise_std={noise.std():.6f})")
                         RESplain("Using input latent as noise (use_as_noise flag, seed=-2)", debug=True)
                     elif noise_type_init == "none" or noise_stdev == 0.0:
                         noise = torch.zeros_like(x)
