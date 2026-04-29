@@ -6,7 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.2-alpha] - 2026-04-28
+
 ### Added
+- **Explicit `latent_role` widget** on every Dazzle sampler node
+  (Issue [#11](https://github.com/DazzleNodes/ComfyUI-DazzleKSampler/issues/11)).
+  Replaces the seed=-2 magic with five explicit choices:
+  - `auto` *(default)* — inspect dict shape, dispatch accordingly. Honors
+    `use_as_noise=True` regardless of seed value (the legacy seed=-2 path
+    still works under `auto`, with a deprecation log).
+  - `noise` — force Shape B (samples as noise, init zeroed).
+  - `latent_image` — force Shape A (samples as init, noise from seed).
+  - `noise+latent_image` — force Shape C (init from samples, noise from
+    `noise` key).
+  - `seed_driven` — ignore upstream flags, generate noise from seed.
+  - The seed widget is auto-hidden when `latent_role ∈ {noise,
+    noise+latent_image}` (the seed is unused on those paths). Implemented
+    via a JS extension at `web/dazzle_ksampler.js`.
+  - Mismatch warnings printed to console when an explicit role doesn't
+    match the detected dict shape (e.g., `latent_role=noise+latent_image`
+    on a Shape A dict falls back to Shape A with a warning).
+  - Auto-mode dispatching to Shape B/C without seed=-2 emits a one-line
+    informational notice on the first step so users see the modern
+    behavior is active (Option C semantics).
 - **Dazzle TauSampler node** -- tau complement sampling based on the Tau
   Operator from D. Darcy's Scarcity Framework
   - New node: "Dazzle TauSampler (DazzleNodes)" with clean, focused UI
@@ -18,6 +40,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Note: v1 implementation is a simplified complement (x_0 - x_next).
     Future versions will implement proper structure/noise separation
     in the complement via the resolution function R.
+
+### Changed
+- **`py/beta/_latent_noise_protocol.py`** upgraded from a 3-tuple return
+  to a `LatentNoiseDispatch` dataclass with `noise`, `x`, `detected_shape`,
+  `applied`, `warning`, `deprecation` fields. The new helper signature is
+  `resolve_latent_as_noise(latent_unbatch, x, noise_seed,
+  latent_role="auto") -> LatentNoiseDispatch`. The pure-function contract
+  is preserved (no I/O, no logging — the dispatch site emits prints).
+- **Tests rewritten** (`tests/test_latent_noise_protocol.py`) — 35 cases
+  covering shape detection (5), legacy v0.1.1 parity with auto+seed=-2 (5),
+  the full 5×4 explicit role × shape matrix (16), auto-mode + normal seed
+  (4), protocol invariants (3), defensive (1), use_as_noise=False (1).
+- **`docs/wiki/Noise-Passthrough.md`** — documents the new widget,
+  dispatch matrix, migration path from seed=-2, and the seed-widget
+  hiding rule.
+
+### Fixed
+- **`latent_role=noise` on Shape C upstream** previously cloned `samples`
+  (the VAE-encoded init image) as the noise tensor, producing
+  "image-as-noise" output where the encoded figure leaked through as a
+  ghost silhouette. Now correctly uses the `noise` key (the upstream's
+  actual noise tensor) and zeroes the init slot. To preserve the
+  img2img anchor, use `latent_role=noise+latent_image` instead.
+- **`latent_role=noise` on Shape A upstream** (no `use_as_noise` flag,
+  no `noise` key) now falls back to seed-driven noise generation with a
+  warning, instead of cloning the encoded image as noise (which produced
+  the same ghost-silhouette artifact class).
+
+### Changed (semantic, within v0.1.2-alpha pre-release)
+- **`latent_role=seed_driven`** is now a true txt2img override: the init
+  slot is zeroed AND noise is generated from the seed. Previously this
+  was equivalent to `latent_image` (samples preserved as init). The
+  change makes `seed_driven` distinct from `latent_image` so users can
+  compare "img2img with this seed" (`latent_image`) vs "what this prompt
+  would produce from scratch" (`seed_driven`) without changing upstream
+  connections.
+
+### Deprecated
+- **`seed = -2`** as a dispatch trigger. Still works under `latent_role =
+  auto` (with a one-time deprecation log per generation) but will lose
+  its special meaning in a future release. Set `latent_role` explicitly
+  to control dispatch.
 
 ## [0.1.1-alpha] - 2026-04-28
 

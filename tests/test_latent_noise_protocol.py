@@ -1,18 +1,15 @@
 """Tests for the latent-dict protocol resolver in `_latent_noise_protocol`.
 
-Covers the four-shape protocol × {seed=-2, seed=normal} combinations.
+Coverage:
 
-Mapping to the design doc's test table:
-- Test 1:  Shape A + seed=-2          → not_applied
-- Test 2:  Shape B + seed=-2          → shape_b (the FIX path)
-- Test 3:  Shape B noise-fill + seed=-2 → shape_b
-- Test 4:  Shape B image+noise + seed=-2 → shape_b
-- Test 5:  Shape C + seed=-2          → shape_c (preserved behavior)
-- Test 6:  Shape D + seed=-2          → not_applied
-- Test 7:  Shape B + seed=12345       → not_applied
-- Test 8:  Shape C + seed=12345       → not_applied
-- Test 12: Shape A no use_as_noise + seed=-2 → not_applied
-- Test 13: Shape D zeros + seed=-2    → not_applied (deterministic noise from seed)
+- v0.1.1-alpha legacy seed=-2 + auto-mode tests (preserved as parity guard)
+- 5x4 latent_role x detected-shape dispatch matrix (v0.1.2-alpha)
+- Mismatch warning emission for explicit roles
+- Deprecation log for noise_seed=-2 + auto
+- Option C informational notice when auto dispatches to Shape B/C
+  without the legacy seed=-2 signal
+- Tensor-aliasing guards (Shape B clones; mutating return doesn't touch dict)
+- 5D video-latent shape compatibility
 """
 
 import torch
@@ -32,6 +29,16 @@ _spec = importlib.util.spec_from_file_location("_latent_noise_protocol", _HELPER
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 resolve_latent_as_noise = _mod.resolve_latent_as_noise
+detect_shape = _mod.detect_shape
+LatentNoiseDispatch = _mod.LatentNoiseDispatch
+ROLE_AUTO = _mod.ROLE_AUTO
+ROLE_NOISE = _mod.ROLE_NOISE
+ROLE_LATENT_IMAGE = _mod.ROLE_LATENT_IMAGE
+ROLE_NOISE_LATENT_IMAGE = _mod.ROLE_NOISE_LATENT_IMAGE
+ROLE_SEED_DRIVEN = _mod.ROLE_SEED_DRIVEN
+SHAPE_A = _mod.SHAPE_A
+SHAPE_B = _mod.SHAPE_B
+SHAPE_C = _mod.SHAPE_C
 
 
 # ---------- fixtures ----------
@@ -46,17 +53,17 @@ def _seeded_tensor(shape, seed):
 
 
 def make_shape_A(shape=LATENT_SHAPE_4D, seed=42):
-    """Pure init — img2img. No use_as_noise flag."""
+    """Pure init -- img2img. No use_as_noise flag."""
     return {"samples": _seeded_tensor(shape, seed)}
 
 
 def make_shape_B(shape=LATENT_SHAPE_4D, seed=42):
-    """Pure noise — dimensions only / img2noise / image+noise."""
+    """Pure noise -- dimensions only / img2noise / image+noise."""
     return {"samples": _seeded_tensor(shape, seed), "use_as_noise": True}
 
 
 def make_shape_C(shape=LATENT_SHAPE_4D, seed=42):
-    """Layered — img2img + img2noise."""
+    """Layered -- img2img + img2noise."""
     return {
         "samples": _seeded_tensor(shape, seed),       # encoded image (init)
         "noise":   _seeded_tensor(shape, seed + 1),   # shaped noise
@@ -65,185 +72,405 @@ def make_shape_C(shape=LATENT_SHAPE_4D, seed=42):
 
 
 def make_shape_D(shape=LATENT_SHAPE_4D):
-    """Empty — txt2img / EmptyLatentImage."""
+    """Empty -- txt2img / EmptyLatentImage. Dispatch-equivalent to Shape A."""
     return {"samples": torch.zeros(shape)}
 
 
-# ---------- pure helper tests ----------
-
-def test_1_shape_A_seed_minus_2_not_applied():
-    """Shape A (img2img, no use_as_noise) + seed=-2 → falls through to seed-driven."""
-    latent = make_shape_A()
+def _resolve(latent, role=ROLE_AUTO, seed=12345):
+    """Convenience wrapper -- builds x and calls resolver."""
     x = latent["samples"].clone()
-    x_orig = x.clone()
-    noise, x_out, applied = resolve_latent_as_noise(latent, x, noise_seed=-2)
-    assert noise is None
-    assert torch.equal(x_out, x_orig)
-    assert applied == "not_applied"
+    return resolve_latent_as_noise(latent, x, noise_seed=seed,
+                                   latent_role=role)
 
 
-def test_2_shape_B_seed_minus_2_zeros_init_THE_FIX():
-    """Shape B (pure noise) + seed=-2 → noise = samples, init = zeros."""
+# ---------- shape detection ----------
+
+def test_detect_shape_A():
+    assert detect_shape(make_shape_A()) == SHAPE_A
+
+
+def test_detect_shape_B():
+    assert detect_shape(make_shape_B()) == SHAPE_B
+
+
+def test_detect_shape_C():
+    assert detect_shape(make_shape_C()) == SHAPE_C
+
+
+def test_detect_shape_D_collapses_to_A():
+    """Shape D (zeros samples) is dispatch-equivalent to Shape A."""
+    assert detect_shape(make_shape_D()) == SHAPE_A
+
+
+def test_detect_shape_explicit_use_as_noise_false():
+    """use_as_noise=False is treated as no-flag (Shape A)."""
+    latent = {"samples": _seeded_tensor(LATENT_SHAPE_4D, 42),
+              "use_as_noise": False}
+    assert detect_shape(latent) == SHAPE_A
+
+
+# ---------- v0.1.1 legacy parity (auto + seed=-2) ----------
+
+def test_legacy_shape_A_seed_minus_2_auto_falls_through():
+    """Shape A + seed=-2 + auto -> shape_a (caller does seed-driven noise).
+    Deprecation log fires (informing user -2 is no longer special)."""
+    r = _resolve(make_shape_A(), role=ROLE_AUTO, seed=-2)
+    assert r.applied == "shape_a"
+    assert r.noise is None  # caller falls through to seed-driven generation
+    assert r.deprecation is not None
+    assert "deprecated" in r.deprecation.lower()
+
+
+def test_legacy_shape_B_seed_minus_2_auto_zeros_init():
+    """Shape B + seed=-2 + auto -> shape_b (the v0.1.1 fix path).
+    Deprecation log fires; NO Option C notice (legacy path matches)."""
     latent = make_shape_B()
-    x = latent["samples"].clone()
-    noise, x_out, applied = resolve_latent_as_noise(latent, x, noise_seed=-2)
-    assert noise is not None
-    assert torch.equal(noise, latent["samples"])    # noise IS the samples (fresh clone)
-    assert x_out.abs().max().item() == 0.0          # init is zeroed — THE FIX
-    assert applied == "shape_b"
+    samples_orig = latent["samples"].clone()
+    r = _resolve(latent, role=ROLE_AUTO, seed=-2)
+    assert r.applied == "shape_b"
+    assert r.noise is not None
+    assert torch.equal(r.noise, samples_orig)
+    assert r.x.abs().max().item() == 0.0  # init zeroed -- THE FIX
+    assert r.deprecation is not None
+    assert r.warning is None  # no Option C notice when seed=-2
 
 
-def test_3_shape_B_noise_fill_seed_minus_2_zeros_init():
-    """Shape B variant (different content) + seed=-2 → same fix path."""
-    latent = make_shape_B(seed=99)
-    x = latent["samples"].clone()
-    noise, x_out, applied = resolve_latent_as_noise(latent, x, noise_seed=-2)
-    assert noise is not None
-    assert torch.equal(noise, latent["samples"])
-    assert x_out.abs().max().item() == 0.0
-    assert applied == "shape_b"
+def test_legacy_shape_C_seed_minus_2_auto_preserves_init():
+    """Shape C + seed=-2 + auto -> shape_c. The img2img regression guard."""
+    latent = make_shape_C()
+    samples_orig = latent["samples"].clone()
+    noise_orig = latent["noise"].clone()
+    r = _resolve(latent, role=ROLE_AUTO, seed=-2)
+    assert r.applied == "shape_c"
+    assert torch.equal(r.noise, noise_orig)
+    assert torch.equal(r.x, samples_orig)  # init unchanged
+    assert r.deprecation is not None
 
 
-def test_4_shape_B_5D_video_latent_seed_minus_2_zeros_init():
-    """Shape B with 5D (video) latent shape — fix works for any shape."""
+def test_legacy_shape_D_seed_minus_2_auto_falls_through():
+    """Shape D + seed=-2 + auto -> shape_a (samples is zeros)."""
+    r = _resolve(make_shape_D(), role=ROLE_AUTO, seed=-2)
+    assert r.applied == "shape_a"
+    assert r.noise is None
+    assert r.deprecation is not None
+
+
+def test_legacy_5D_video_latent_shape_B_seed_minus_2():
+    """5D latent (qwen/Wan) -- Shape B fix is shape-agnostic via zeros_like."""
     latent = make_shape_B(shape=LATENT_SHAPE_5D, seed=7)
-    x = latent["samples"].clone()
-    noise, x_out, applied = resolve_latent_as_noise(latent, x, noise_seed=-2)
-    assert noise is not None
-    assert noise.shape == LATENT_SHAPE_5D
-    assert x_out.shape == LATENT_SHAPE_5D
-    assert x_out.abs().max().item() == 0.0
-    assert applied == "shape_b"
+    r = _resolve(latent, role=ROLE_AUTO, seed=-2)
+    assert r.applied == "shape_b"
+    assert r.noise.shape == LATENT_SHAPE_5D
+    assert r.x.shape == LATENT_SHAPE_5D
+    assert r.x.abs().max().item() == 0.0
 
 
-def test_5_shape_C_seed_minus_2_preserves_init_AND_uses_noise_key():
-    """Shape C (img2img + img2noise) + seed=-2 → both roles preserved.
+# ---------- explicit role x shape matrix (5 x 4 = 20 cells) ----------
 
-    THIS IS THE REGRESSION GUARD for the case the user worried about.
-    The fix must NOT zero the init when a separate "noise" key is present.
-    """
-    latent = make_shape_C()
-    x = latent["samples"].clone()
-    x_orig = x.clone()
-    noise, x_out, applied = resolve_latent_as_noise(latent, x, noise_seed=-2)
-    assert noise is not None
-    # noise comes from the "noise" key, NOT from samples
-    assert torch.equal(noise, latent["noise"])
-    assert not torch.equal(noise, latent["samples"])
-    # x (init image) is preserved — img2img semantics intact
-    assert torch.equal(x_out, x_orig)
-    assert applied == "shape_c"
+# === ROLE: noise -- forces Shape B path ===
 
-
-def test_6_shape_D_zeros_seed_minus_2_not_applied():
-    """Shape D (empty/EmptyLatentImage, no flags) + seed=-2 → falls through.
-
-    Documents the user's pixel-identical 'fill_type=black' test result:
-    Shape D never enters the latent-as-noise branch; seed=-2 is handled
-    downstream by the seed-driven noise generator.
-    """
-    latent = make_shape_D()
-    x = latent["samples"].clone()
-    x_orig = x.clone()
-    noise, x_out, applied = resolve_latent_as_noise(latent, x, noise_seed=-2)
-    assert noise is None
-    assert torch.equal(x_out, x_orig)
-    assert applied == "not_applied"
+def test_noise_role_x_shape_A_warns_falls_back_to_seed_driven():
+    """Shape A has no noise tensor; role=noise falls back to seed-driven
+    rather than treating samples (encoded image) as noise (which produced
+    the v0.1.2-alpha Image #4 ghost-silhouette artifact)."""
+    latent = make_shape_A()
+    samples_orig = latent["samples"].clone()
+    r = _resolve(latent, role=ROLE_NOISE)
+    assert r.applied == "shape_a"
+    assert r.noise is None  # caller does seed-driven generation
+    assert torch.equal(r.x, samples_orig)  # samples preserved as init
+    assert r.warning is not None
+    assert "no upstream noise tensor" in r.warning
+    assert "Falling back to seed-driven" in r.warning
 
 
-def test_7_shape_B_seed_normal_not_applied():
-    """Shape B + seed=12345 → falls through (seed != -2 means no opt-in)."""
+def test_noise_role_x_shape_B_no_warning():
     latent = make_shape_B()
-    x = latent["samples"].clone()
-    x_orig = x.clone()
-    noise, x_out, applied = resolve_latent_as_noise(latent, x, noise_seed=12345)
-    assert noise is None
-    assert torch.equal(x_out, x_orig)
-    assert applied == "not_applied"
+    samples_orig = latent["samples"].clone()
+    r = _resolve(latent, role=ROLE_NOISE)
+    assert r.applied == "shape_b"
+    assert torch.equal(r.noise, samples_orig)
+    assert r.x.abs().max().item() == 0.0
+    assert r.warning is None
 
 
-def test_8_shape_C_seed_normal_not_applied():
-    """Shape C + seed=12345 → falls through (noise key ignored when seed != -2)."""
+def test_noise_role_x_shape_C_uses_noise_key_not_samples():
+    """The v0.1.2-alpha Image #4 fix: role=noise on Shape C must use the
+    'noise' key (the upstream's actual noise tensor), NOT samples (which
+    is the encoded init image). Pre-fix, samples-as-noise produced
+    image-structured 'noise' the model could not denoise -> red silhouette."""
     latent = make_shape_C()
-    x = latent["samples"].clone()
-    x_orig = x.clone()
-    noise, x_out, applied = resolve_latent_as_noise(latent, x, noise_seed=12345)
-    assert noise is None
-    assert torch.equal(x_out, x_orig)
-    assert applied == "not_applied"
+    samples_orig = latent["samples"].clone()
+    noise_key_orig = latent["noise"].clone()
+    r = _resolve(latent, role=ROLE_NOISE)
+    assert r.applied == "shape_b"
+    # noise comes from the "noise" key, not from samples (the encoded image)
+    assert torch.equal(r.noise, noise_key_orig)
+    assert not torch.equal(r.noise, samples_orig)  # explicit anti-regression
+    assert r.x.abs().max().item() == 0.0  # init zeroed
+    assert r.warning is not None
+    assert "noise' key" in r.warning
+    assert "noise+latent_image" in r.warning  # migration hint
 
 
-def test_12_shape_A_use_as_noise_false_seed_minus_2_not_applied():
-    """Explicit use_as_noise=False + seed=-2 → still falls through.
-
-    Belt-and-suspenders: ensures the dispatch checks use_as_noise truthily,
-    not just dict-key presence.
-    """
-    latent = {"samples": _seeded_tensor(LATENT_SHAPE_4D, 42), "use_as_noise": False}
-    x = latent["samples"].clone()
-    x_orig = x.clone()
-    noise, x_out, applied = resolve_latent_as_noise(latent, x, noise_seed=-2)
-    assert noise is None
-    assert torch.equal(x_out, x_orig)
-    assert applied == "not_applied"
-
-
-def test_13_shape_D_zeros_samples_seed_minus_2_falls_through():
-    """Shape D with zeros samples + seed=-2 → falls through unchanged.
-
-    This codifies the behavior the user empirically verified with
-    fill_type=black: zeros latent + seed=-2 → seed-driven noise path.
-    A future 'fix' that zeros x for Shape D would break this assertion.
-    """
+def test_noise_role_x_shape_D_warns_falls_back_to_seed_driven():
+    """Shape D collapses to Shape A in detection; role=noise falls back
+    to seed-driven rather than using zeros-as-noise (which would produce
+    a degenerate noise tensor)."""
     latent = make_shape_D()
-    x = latent["samples"].clone()
-    assert x.abs().max().item() == 0.0  # sanity: it's zeros to start
-    noise, x_out, applied = resolve_latent_as_noise(latent, x, noise_seed=-2)
-    assert noise is None
-    # x stays as zeros (it was zeros to begin with) — but not because we zeroed it
-    assert torch.equal(x_out, x)
-    assert applied == "not_applied"
+    r = _resolve(latent, role=ROLE_NOISE)
+    assert r.applied == "shape_a"
+    assert r.noise is None  # caller does seed-driven generation
+    assert r.warning is not None
+    assert "no upstream noise tensor" in r.warning
 
 
-# ---------- additional protocol invariants ----------
+# === ROLE: latent_image -- forces Shape A path ===
+
+def test_latent_image_role_x_shape_A_no_warning():
+    latent = make_shape_A()
+    samples_orig = latent["samples"].clone()
+    r = _resolve(latent, role=ROLE_LATENT_IMAGE)
+    assert r.applied == "shape_a"
+    assert r.noise is None  # caller does seed-driven
+    assert torch.equal(r.x, samples_orig)
+    assert r.warning is None
+
+
+def test_latent_image_role_x_shape_B_warns_uses_samples_as_init():
+    latent = make_shape_B()
+    samples_orig = latent["samples"].clone()
+    r = _resolve(latent, role=ROLE_LATENT_IMAGE)
+    assert r.applied == "shape_a"
+    assert r.noise is None
+    assert torch.equal(r.x, samples_orig)  # init NOT zeroed (Shape A semantics)
+    assert r.warning is not None
+    assert "expects Shape A" in r.warning
+    assert "shape_b" in r.warning
+
+
+def test_latent_image_role_x_shape_C_warns_discards_noise_key():
+    latent = make_shape_C()
+    samples_orig = latent["samples"].clone()
+    r = _resolve(latent, role=ROLE_LATENT_IMAGE)
+    assert r.applied == "shape_a"
+    assert r.noise is None  # noise key discarded
+    assert torch.equal(r.x, samples_orig)
+    assert r.warning is not None
+    assert "shape_c" in r.warning
+
+
+def test_latent_image_role_x_shape_D_no_warning():
+    """Shape D collapses to Shape A in detection -- so no warning."""
+    latent = make_shape_D()
+    r = _resolve(latent, role=ROLE_LATENT_IMAGE)
+    assert r.applied == "shape_a"
+    assert r.noise is None
+    assert r.warning is None
+
+
+# === ROLE: noise+latent_image -- forces Shape C path ===
+
+def test_noise_latent_image_role_x_shape_A_warns_falls_back_to_shape_a():
+    latent = make_shape_A()
+    samples_orig = latent["samples"].clone()
+    r = _resolve(latent, role=ROLE_NOISE_LATENT_IMAGE)
+    assert r.applied == "shape_a"  # fallback
+    assert r.noise is None
+    assert torch.equal(r.x, samples_orig)
+    assert r.warning is not None
+    assert "expects Shape C" in r.warning
+
+
+def test_noise_latent_image_role_x_shape_B_warns_falls_back_to_shape_a():
+    latent = make_shape_B()
+    samples_orig = latent["samples"].clone()
+    r = _resolve(latent, role=ROLE_NOISE_LATENT_IMAGE)
+    assert r.applied == "shape_a"
+    assert r.noise is None
+    # x preserved (NOT zeroed -- explicit role overrides Shape B fix path)
+    assert torch.equal(r.x, samples_orig)
+    assert r.warning is not None
+
+
+def test_noise_latent_image_role_x_shape_C_no_warning():
+    latent = make_shape_C()
+    samples_orig = latent["samples"].clone()
+    noise_orig = latent["noise"].clone()
+    r = _resolve(latent, role=ROLE_NOISE_LATENT_IMAGE)
+    assert r.applied == "shape_c"
+    assert torch.equal(r.noise, noise_orig)
+    assert torch.equal(r.x, samples_orig)
+    assert r.warning is None
+
+
+def test_noise_latent_image_role_x_shape_D_warns_falls_back_to_shape_a():
+    latent = make_shape_D()
+    r = _resolve(latent, role=ROLE_NOISE_LATENT_IMAGE)
+    assert r.applied == "shape_a"
+    assert r.noise is None
+    assert r.warning is not None
+
+
+# === ROLE: seed_driven -- forces seed-driven noise (no dispatch) ===
+
+def test_seed_driven_role_x_shape_A_zeros_init_for_txt2img():
+    """v0.1.2-alpha semantics: seed_driven means TRUE txt2img -- init slot
+    is zeroed regardless of upstream samples. This is what makes
+    seed_driven distinct from latent_image (which preserves samples as
+    img2img init)."""
+    latent = make_shape_A()
+    r = _resolve(latent, role=ROLE_SEED_DRIVEN)
+    assert r.applied == "seed_driven"
+    assert r.noise is None  # caller does seed-driven noise generation
+    assert r.x.abs().max().item() == 0.0  # init zeroed (txt2img)
+    # Shape A still warns because zeroing samples is non-default behavior
+    # for an upstream that doesn't have use_as_noise=True; users should
+    # know to use latent_image instead if they want img2img.
+    assert r.warning is not None
+    assert "txt2img" in r.warning
+    assert "latent_image" in r.warning
+
+
+def test_seed_driven_role_x_shape_B_zeros_init_ignores_use_as_noise():
+    latent = make_shape_B()
+    r = _resolve(latent, role=ROLE_SEED_DRIVEN)
+    assert r.applied == "seed_driven"
+    assert r.noise is None
+    assert r.x.abs().max().item() == 0.0  # init zeroed (txt2img)
+    assert r.warning is not None
+    assert "ignoring" in r.warning.lower()
+    assert "shape_b" in r.warning
+    assert "txt2img" in r.warning
+
+
+def test_seed_driven_role_x_shape_C_zeros_init_ignores_noise_key():
+    latent = make_shape_C()
+    r = _resolve(latent, role=ROLE_SEED_DRIVEN)
+    assert r.applied == "seed_driven"
+    assert r.noise is None
+    assert r.x.abs().max().item() == 0.0  # init zeroed (txt2img)
+    assert r.warning is not None
+    assert "shape_c" in r.warning
+    assert "txt2img" in r.warning
+
+
+def test_seed_driven_role_x_shape_D_zeros_init():
+    """Shape D upstream is already zeros; seed_driven still emits warning
+    informing the user about the txt2img override (since the role
+    explicitly opts out of any upstream interpretation)."""
+    latent = make_shape_D()
+    r = _resolve(latent, role=ROLE_SEED_DRIVEN)
+    assert r.applied == "seed_driven"
+    assert r.noise is None
+    assert r.x.abs().max().item() == 0.0
+    # Shape D collapses to Shape A in detection -- no warning expected
+    # for the "matched detected shape" path.
+
+
+# === ROLE: auto -- option C semantics (covered above for legacy seed=-2) ===
+
+def test_auto_role_x_shape_A_seed_normal():
+    """Standard txt2img / img2img path -- no warning, no deprecation."""
+    r = _resolve(make_shape_A(), role=ROLE_AUTO, seed=12345)
+    assert r.applied == "shape_a"
+    assert r.noise is None
+    assert r.warning is None
+    assert r.deprecation is None
+
+
+def test_auto_role_x_shape_B_seed_normal_emits_option_c_notice():
+    """Auto dispatched to Shape B without seed=-2 -- modern v0.1.2 path."""
+    latent = make_shape_B()
+    samples_orig = latent["samples"].clone()
+    r = _resolve(latent, role=ROLE_AUTO, seed=12345)
+    assert r.applied == "shape_b"
+    assert torch.equal(r.noise, samples_orig)
+    assert r.x.abs().max().item() == 0.0
+    assert r.warning is not None
+    assert "auto-mode dispatched to Shape B" in r.warning
+    assert r.deprecation is None
+
+
+def test_auto_role_x_shape_C_seed_normal_emits_option_c_notice():
+    """Auto dispatched to Shape C without seed=-2 -- modern v0.1.2 path."""
+    latent = make_shape_C()
+    r = _resolve(latent, role=ROLE_AUTO, seed=12345)
+    assert r.applied == "shape_c"
+    assert r.warning is not None
+    assert "auto-mode dispatched to Shape C" in r.warning
+    assert r.deprecation is None
+
+
+def test_auto_role_x_shape_D_seed_normal():
+    r = _resolve(make_shape_D(), role=ROLE_AUTO, seed=12345)
+    assert r.applied == "shape_a"
+    assert r.noise is None
+    assert r.warning is None
+    assert r.deprecation is None
+
+
+# ---------- protocol invariants ----------
 
 def test_shape_B_noise_is_independent_clone_not_alias():
     """Mutating returned noise must not affect latent['samples']."""
     latent = make_shape_B()
-    x = latent["samples"].clone()
-    noise, x_out, _ = resolve_latent_as_noise(latent, x, noise_seed=-2)
+    r = _resolve(latent, role=ROLE_AUTO, seed=-2)
     original_sum = float(latent["samples"].sum().item())
-    noise.mul_(0)  # mutate noise in-place
+    r.noise.mul_(0)
     assert float(latent["samples"].sum().item()) == original_sum
 
 
 def test_shape_B_x_out_is_independent_zeros_not_alias():
-    """Mutating returned x_out must not affect latent['samples']."""
+    """Mutating returned x must not affect latent['samples']."""
     latent = make_shape_B()
-    x = latent["samples"].clone()
-    _, x_out, _ = resolve_latent_as_noise(latent, x, noise_seed=-2)
+    r = _resolve(latent, role=ROLE_AUTO, seed=-2)
     original_sum = float(latent["samples"].sum().item())
-    x_out.add_(1.0)  # mutate x_out
+    r.x.add_(1.0)
     assert float(latent["samples"].sum().item()) == original_sum
 
 
 def test_shape_C_noise_dtype_device_match_x():
-    """Returned noise should be cast to x's dtype/device (the existing .to() call)."""
+    """Returned noise should be cast to x's dtype/device."""
     latent = make_shape_C()
-    # Simulate x being float32 on cpu while noise is float64 on cpu
     latent["noise"] = latent["noise"].to(dtype=torch.float64)
     x = latent["samples"].clone().to(dtype=torch.float32)
-    noise, _, applied = resolve_latent_as_noise(latent, x, noise_seed=-2)
-    assert applied == "shape_c"
-    assert noise.dtype == x.dtype
+    r = resolve_latent_as_noise(latent, x, noise_seed=-2,
+                                latent_role=ROLE_AUTO)
+    assert r.applied == "shape_c"
+    assert r.noise.dtype == x.dtype
 
+
+# ---------- defensive: invalid role ----------
+
+def test_invalid_role_falls_back_to_auto_with_warning():
+    latent = make_shape_A()
+    r = resolve_latent_as_noise(latent, latent["samples"].clone(),
+                                noise_seed=12345,
+                                latent_role="not_a_real_role")
+    assert r.applied == "shape_a"  # fell back to auto + Shape A
+    assert r.warning is not None
+    assert "not_a_real_role" in r.warning
+
+
+# ---------- backwards-compat use_as_noise=False on dict ----------
+
+def test_use_as_noise_false_explicit_treated_as_shape_a():
+    """Explicit use_as_noise=False shouldn't trip Shape B detection."""
+    latent = {"samples": _seeded_tensor(LATENT_SHAPE_4D, 42),
+              "use_as_noise": False}
+    r = _resolve(latent, role=ROLE_AUTO, seed=-2)
+    assert r.applied == "shape_a"
+    assert r.noise is None
+
+
+# ---------- manual harness ----------
 
 if __name__ == "__main__":
-    # Manual harness — works without pytest
     import sys, traceback
-    _mod = sys.modules[__name__]
-    _tests = [(n, getattr(_mod, n)) for n in dir(_mod)
-              if n.startswith("test_") and callable(getattr(_mod, n))]
+    _module = sys.modules[__name__]
+    _tests = [(n, getattr(_module, n)) for n in dir(_module)
+              if n.startswith("test_") and callable(getattr(_module, n))]
     _passed = _failed = 0
     for _name, _fn in _tests:
         try:

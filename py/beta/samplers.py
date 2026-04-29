@@ -92,6 +92,7 @@ class SharkSampler:
                 "noise_type_init": (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian"}),
                 "noise_stdev":     ("FLOAT",                      {"default": 1.0, "min": -10000.0, "max": 10000.0, "step":0.01, "round": False, }),
                 "noise_seed":      ("INT",                        {"default": 0,   "min": -2,       "max": 0xffffffffffffffff}),
+                "latent_role":     (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "How to interpret the input latent dict. 'auto' inspects dict shape (use_as_noise flag, presence of 'noise' key) and dispatches accordingly. 'noise' = use upstream's noise tensor (samples for Shape B, noise key for Shape C); init zeroed. 'latent_image' = use samples as init image, generate noise from seed. 'noise+latent_image' = use 'noise' key as noise + samples as init (Shape C only; falls back otherwise). 'seed_driven' = true txt2img: zero init AND generate noise from seed (distinct from latent_image, which preserves samples as img2img init). Mismatch warnings printed to console when explicit role does not match incoming dict shape. seed=-2 magic is deprecated under 'auto'."}),
                 "sampler_mode":    (['unsample', 'standard', 'resample'], {"default": "standard"}),
                 "scheduler":       (get_res4lyf_scheduler_list(), {"default": "beta57"},),
                 "steps":           ("INT",                        {"default": 30,  "min": 1,        "max": 10000.0}),
@@ -148,6 +149,7 @@ class SharkSampler:
             k_init             : float                  =  1.0,
             cfgpp              : float                  =  0.0,
             noise_seed         : int                    = -1,
+            latent_role        : str                    = "auto",
             options                                     = None,
             sde_noise                                   = None,
             sde_noise_steps    : int                    =  1,
@@ -543,36 +545,46 @@ class SharkSampler:
                     sde_noise_steps = 1
 
                 for total_steps_iter in range (sde_noise_steps):
-                        
-                    # Latent-as-noise passthrough via the four-shape latent-dict protocol.
+
+                    # Latent-as-noise dispatch via the four-shape latent-dict protocol.
                     # See py/beta/_latent_noise_protocol.py for the contract.
                     #
-                    # Activates when:
-                    #   - The latent has use_as_noise=True (set by upstream nodes like SmartResCalc), AND
-                    #   - noise_seed == -2 (explicit opt-in; -2 is outside rgthree's -1=random range
-                    #     and is unused by ClownsharKSampler natively)
+                    # User-facing dispatch is controlled by the latent_role widget:
+                    #   auto                -- inspect dict shape, dispatch accordingly
+                    #                          (Option C: emits informational notice when
+                    #                          shape-driven dispatch fires without seed=-2)
+                    #   noise               -- force Shape B (samples as noise; init zeroed)
+                    #   latent_image        -- force Shape A (samples as init; seed noise)
+                    #   noise+latent_image  -- force Shape C (separate noise key)
+                    #   seed_driven         -- force seed-driven (ignore use_as_noise)
                     #
-                    # Behavior (resolved inside the helper):
-                    #   Shape B (use_as_noise, no "noise" key)
-                    #     → noise = samples; init = zeros (samples acts purely as noise)
-                    #   Shape C (use_as_noise + "noise" key)
-                    #     → noise = latent["noise"]; init = samples (img2img + img2noise)
-                    #   Shapes A / D (no use_as_noise)
-                    #     → falls through to seed-driven noise generation below
-                    #
-                    # Works at any denoise level — user controls influence via denoise amount.
-                    use_latent_as_noise = latent_unbatch.get("use_as_noise", False)
-                    if use_latent_as_noise or noise_seed == -2:
-                        print(f"[ClownsharKSampler] Noise check: use_as_noise={use_latent_as_noise}, noise_seed={noise_seed}, both_met={use_latent_as_noise and noise_seed == -2}")
+                    # Legacy: noise_seed=-2 with latent_role=auto still works with a
+                    # deprecation log. Will be removed in a future release.
+                    _disp = resolve_latent_as_noise(
+                        latent_unbatch, x, noise_seed, latent_role=latent_role,
+                    )
+                    if total_steps_iter == 0:
+                        print(f"[DazzleKSampler] latent_role={latent_role}, "
+                              f"detected={_disp.detected_shape}, "
+                              f"applied={_disp.applied}, noise_seed={noise_seed}")
+                        if _disp.deprecation:
+                            print(f"[DazzleKSampler] DEPRECATION: {_disp.deprecation}")
+                        if _disp.warning:
+                            print(f"[DazzleKSampler] WARNING: {_disp.warning}")
 
-                    _proto_noise, x, _proto_shape = resolve_latent_as_noise(latent_unbatch, x, noise_seed)
-                    if _proto_noise is not None:
-                        noise = _proto_noise
-                        if _proto_shape == "shape_c":
-                            print(f"[ClownsharKSampler] Using provided shaped noise (noise key, noise_mean={noise.mean():.6f}, noise_std={noise.std():.6f})")
-                        else:  # shape_b
-                            print(f"[ClownsharKSampler] Using input latent as noise -- init zeroed (noise_mean={noise.mean():.6f}, noise_std={noise.std():.6f})")
-                        RESplain("Using input latent as noise (use_as_noise flag, seed=-2)", debug=True)
+                    # Always honor the dispatch's x: it may be zeroed (Shape B,
+                    # seed_driven), preserved as samples (Shape A, shape_c init),
+                    # or unchanged. The helper has already applied the correct
+                    # transformation for the role+shape combination.
+                    x = _disp.x
+
+                    if _disp.noise is not None:
+                        noise = _disp.noise
+                        if total_steps_iter == 0:
+                            print(f"[DazzleKSampler] noise_mean={noise.mean():.6f}, "
+                                  f"noise_std={noise.std():.6f}")
+                        RESplain("Using input latent as noise (latent_role dispatch)",
+                                 debug=True)
                     elif noise_type_init == "none" or noise_stdev == 0.0:
                         noise = torch.zeros_like(x)
                     else:
@@ -941,6 +953,7 @@ class SharkSampler_Beta:
                 "denoise":         ("FLOAT",                      {"default": 1.0, "min": -10000.0, "max": 10000.0, "step":0.01}),
                 "cfg":             ("FLOAT",                      {"default": 5.5, "min": -10000.0, "max": 10000.0, "step":0.01, "round": False, "tooltip": "Negative values use channelwise CFG." }),
                 "seed":            ("INT",                        {"default": 0,   "min": -1,       "max": 0xffffffffffffffff}),
+                "latent_role":     (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "How to interpret the input latent dict. See the DazzleKSampler tooltip for full details. 'auto' is the right default for almost all workflows."}),
                 "sampler_mode": (['unsample', 'standard', 'resample'], {"default": "standard"}),
                 },
             "optional": {
@@ -990,14 +1003,15 @@ class SharkSampler_Beta:
             k_init          : float                  =  1.0,
             cfgpp           : float                  =  0.0,
             seed            : int                    = -1,
+            latent_role     : str                    = "auto",
             options                                  = None,
             sde_noise                                = None,
             sde_noise_steps : int                    =  1,
-        
-            extra_options   : str                    = "", 
+
+            extra_options   : str                    = "",
             **kwargs,
-            ): 
-        
+            ):
+
 
         options_mgr = OptionsManager(options, **kwargs)
         
@@ -1032,11 +1046,12 @@ class SharkSampler_Beta:
             positive        = positive,
             negative        = negative, 
             sampler         = sampler, 
-            cfgpp           = cfgpp, 
-            noise_seed      = seed, 
-            options         = options, 
-            sde_noise       = sde_noise, 
-            sde_noise_steps = sde_noise_steps, 
+            cfgpp           = cfgpp,
+            noise_seed      = seed,
+            latent_role     = latent_role,
+            options         = options,
+            sde_noise       = sde_noise,
+            sde_noise_steps = sde_noise_steps,
             noise_type_init = noise_type_init,
             noise_stdev     = noise_stdev,
             sampler_mode    = sampler_mode,
@@ -1044,7 +1059,7 @@ class SharkSampler_Beta:
             sigmas          = sigmas,
 
             extra_options   = extra_options)
-        
+
         return (output, denoised,options_mgr.as_dict())
 
 
@@ -1116,7 +1131,8 @@ class ClownSamplerAdvanced_Beta:
                     "d_noise":                ("FLOAT",                      {"default": 1.0, "min": -10000, "max": 10000, "step":0.01,                 "tooltip": "Downscales the sigma schedule. Values around 0.98-0.95 can lead to a large boost in detail and paint textures."}),
                     "momentum":               ("FLOAT",                      {"default": 1.0, "min": -10000, "max": 10000, "step":0.01,                 "tooltip": "Accelerate convergence with positive values when sampling, negative values when unsampling."}),
                     "noise_seed_sde":         ("INT",                        {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
-                    "sampler_name":           (get_sampler_name_list(),      {"default": get_default_sampler_name()}), 
+                    "latent_role":            (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "ADVISORY: this node returns a SAMPLER object and does not consume a latent input directly; the dispatch decision is made by the downstream node that consumes the SAMPLER. The widget is shown for UI consistency with the other Dazzle sampler nodes."}),
+                    "sampler_name":           (get_sampler_name_list(),      {"default": get_default_sampler_name()}),
 
                     "implicit_type":          (IMPLICIT_TYPE_NAMES,          {"default": "predictor-corrector"}), 
                     "implicit_type_substeps": (IMPLICIT_TYPE_NAMES,          {"default": "predictor-corrector"}), 
@@ -1180,6 +1196,7 @@ class ClownSamplerAdvanced_Beta:
             c2                            : float = 0.5,
             c3                            : float = 1.0,
             noise_seed_sde                : int = -1,
+            latent_role                   : str = "auto",
             sampler_name                  : str = "res_2m",
             implicit_sampler_name         : str = "gauss-legendre_2s",
             
@@ -1441,6 +1458,7 @@ class ClownsharKSampler_Beta:
                     "denoise":      ("FLOAT",                      {"default": 1.0, "min": -10000, "max": MAX_STEPS, "step":0.01}),
                     "cfg":          ("FLOAT",                      {"default": 5.5, "min": -100.0, "max": 100.0,     "step":0.01, "round": False, }),
                     "seed":         ("INT",                        {"default": 0,   "min": -2,     "max": 0xffffffffffffffff}),
+                    "latent_role":  (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "How to interpret the input latent dict. 'auto' inspects dict shape (use_as_noise flag, presence of 'noise' key) and dispatches accordingly. 'noise' = use upstream's noise tensor (samples for Shape B, noise key for Shape C); init zeroed. 'latent_image' = use samples as init image, generate noise from seed. 'noise+latent_image' = use 'noise' key as noise + samples as init (Shape C only; falls back otherwise). 'seed_driven' = true txt2img: zero init AND generate noise from seed (distinct from latent_image, which preserves samples as img2img init). Mismatch warnings printed to console when explicit role does not match incoming dict shape. seed=-2 magic is deprecated under 'auto'."}),
                     "sampler_mode": (['unsample', 'standard', 'resample'], {"default": "standard"}),
                     "bongmath":     ("BOOLEAN",                    {"default": True}),
                     },
@@ -1475,11 +1493,12 @@ class ClownsharKSampler_Beta:
             model                                                  = None,
             denoise                       : float                  = 1.0, 
             scheduler                     : str                    = "beta57", 
-            cfg                           : float                  = 1.0, 
-            seed                          : int                    = -1, 
-            positive                                               = None, 
-            negative                                               = None, 
-            latent_image                  : Optional[dict[Tensor]] = None, 
+            cfg                           : float                  = 1.0,
+            seed                          : int                    = -1,
+            latent_role                   : str                    = "auto",
+            positive                                               = None,
+            negative                                               = None,
+            latent_image                  : Optional[dict[Tensor]] = None,
             steps                         : int                    = 30,
             steps_to_run                  : int                    = -1,
             bongmath                      : bool                   = True,
@@ -1815,11 +1834,12 @@ class ClownsharKSampler_Beta:
             positive        = positive,
             negative        = negative, 
             sampler         = sampler, 
-            cfgpp           = cfgpp, 
-            noise_seed      = seed, 
-            options         = options_mgr.as_dict(), 
-            sde_noise       = sde_noise, 
-            sde_noise_steps = sde_noise_steps, 
+            cfgpp           = cfgpp,
+            noise_seed      = seed,
+            latent_role     = latent_role,
+            options         = options_mgr.as_dict(),
+            sde_noise       = sde_noise,
+            sde_noise_steps = sde_noise_steps,
             noise_type_init = noise_type_init,
             noise_stdev     = noise_stdev,
             sampler_mode    = sampler_mode,
@@ -1851,6 +1871,7 @@ class ClownsharkChainsampler_Beta(ClownsharKSampler_Beta):
                 "cfg":          ("FLOAT",                 {"default": 5.5, "min": -10000.0, "max": 10000.0, "step":0.01, "round": False, "tooltip": "Negative values use channelwise CFG." }),
                 "sampler_mode": (['unsample', 'resample'],{"default": "resample"}),
                 "bongmath":     ("BOOLEAN",               {"default": True}),
+                "latent_role":  (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "How to interpret the input latent dict on chain continuation. See the DazzleKSampler tooltip for full details."}),
                 },
             "optional": {
                 "model":        ("MODEL",),
@@ -1858,9 +1879,9 @@ class ClownsharkChainsampler_Beta(ClownsharKSampler_Beta):
                 "negative":     ("CONDITIONING", ),
                 #"sampler":      ("SAMPLER", ),
                 "sigmas":       ("SIGMAS", ),
-                "latent_image": ("LATENT", ),     
-                "guides":       ("GUIDES", ),   
-                "options":      ("OPTIONS", ),   
+                "latent_image": ("LATENT", ),
+                "guides":       ("GUIDES", ),
+                "options":      ("OPTIONS", ),
                 }
             }
 
@@ -1897,6 +1918,7 @@ class ClownSampler_Beta:
                     "eta":          ("FLOAT",                      {"default": 0.5, "min": -100.0, "max": 100.0,     "step":0.01, "round": False, "tooltip": "Calculated noise amount to be added, then removed, after each step."}),
                     "sampler_name": (get_sampler_name_list     (), {"default": get_default_sampler_name()}), 
                     "seed":         ("INT",                        {"default": -1,   "min": -1,     "max": 0xffffffffffffffff}),
+                    "latent_role":  (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "ADVISORY: this node returns a SAMPLER object and does not consume a latent input directly. The widget is shown for UI consistency."}),
                     "bongmath":     ("BOOLEAN",                    {"default": True}),
                     },
                 "optional": 
@@ -1919,11 +1941,12 @@ class ClownSampler_Beta:
             model                                                  = None,
             denoise                       : float                  = 1.0, 
             scheduler                     : str                    = "beta57", 
-            cfg                           : float                  = 1.0, 
-            seed                          : int                    = -1, 
-            positive                                               = None, 
-            negative                                               = None, 
-            latent_image                  : Optional[dict[Tensor]] = None, 
+            cfg                           : float                  = 1.0,
+            seed                          : int                    = -1,
+            latent_role                   : str                    = "auto",
+            positive                                               = None,
+            negative                                               = None,
+            latent_image                  : Optional[dict[Tensor]] = None,
             steps                         : int                    = 30,
             steps_to_run                  : int                    = -1,
             bongmath                      : bool                   = True,
@@ -2181,6 +2204,7 @@ class BongSampler:
                     {
                     "model":        ("MODEL",),
                     "seed":         ("INT",                        {"default": 0,   "min": -1,     "max": 0xffffffffffffffff}),
+                    "latent_role":  (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "How to interpret the input latent dict. See the DazzleKSampler tooltip for full details. 'auto' is the right default for almost all workflows."}),
                     "steps":        ("INT",                        {"default": 30,  "min":  1,     "max": MAX_STEPS}),
                     "cfg":          ("FLOAT",                      {"default": 5.5, "min": -100.0, "max": 100.0,     "step":0.01, "round": False, }),
                     "sampler_name": (["res_2m", "res_3m", "res_2s", "res_3s","res_2m_sde", "res_3m_sde", "res_2s_sde", "res_3s_sde"], {"default": "res_2s_sde"}), 
@@ -2208,11 +2232,12 @@ class BongSampler:
             model                                                  = None,
             denoise                       : float                  = 1.0, 
             scheduler                     : str                    = "beta57", 
-            cfg                           : float                  = 1.0, 
-            seed                          : int                    = 42, 
-            positive                                               = None, 
-            negative                                               = None, 
-            latent_image                  : Optional[dict[Tensor]] = None, 
+            cfg                           : float                  = 1.0,
+            seed                          : int                    = 42,
+            latent_role                   : str                    = "auto",
+            positive                                               = None,
+            negative                                               = None,
+            latent_image                  : Optional[dict[Tensor]] = None,
             steps                         : int                    = 30,
             steps_to_run                  : int                    = -1,
             bongmath                      : bool                   = True,
@@ -2457,11 +2482,12 @@ class BongSampler:
             positive        = positive,
             negative        = negative, 
             sampler         = sampler, 
-            cfgpp           = cfgpp, 
-            noise_seed      = seed, 
-            options         = options_mgr.as_dict(), 
-            sde_noise       = sde_noise, 
-            sde_noise_steps = sde_noise_steps, 
+            cfgpp           = cfgpp,
+            noise_seed      = seed,
+            latent_role     = latent_role,
+            options         = options_mgr.as_dict(),
+            sde_noise       = sde_noise,
+            sde_noise_steps = sde_noise_steps,
             noise_type_init = noise_type_init,
             noise_stdev     = noise_stdev,
             sampler_mode    = sampler_mode,

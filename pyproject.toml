@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comfyui-dazzle-ksampler"
-version = "0.1.1"
+version = "0.1.2"
 description = "Enhanced KSampler for ComfyUI with SmartResCalc noise passthrough and DazzleCommand integration. Based on RES4LYF's ClownsharKSampler."
 readme = "README.md"
 license = {text = "AGPL-3.0-or-later"}

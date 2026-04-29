@@ -32,6 +32,9 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip setuptools wheel
+        # CPU-only torch -- the helper imports torch but doesn't need CUDA.
+        # Smaller than the default wheel and CI doesn't have a GPU anyway.
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
         pip install -e ".[dev]"
 
     - name: Lint with flake8
@@ -48,7 +51,13 @@ jobs:
 
     - name: Run tests
       run: |
-        python -m pytest tests/ -v
+        # pytest collides with this project's local py/ directory.
+        # pytest's _pytest.compat does `LEGACY_PATH = py.path.local`,
+        # but our py/ package shadows the PyPI py package on sys.path
+        # (cwd is sys.path[0] when running `python -m pytest`).
+        # Use the manual harness instead -- it exits 1 on any failure
+        # so CI status remains honest.
+        python tests/test_latent_noise_protocol.py
 
   build:
     runs-on: ubuntu-latest
