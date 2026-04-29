@@ -40,6 +40,16 @@ Homepage = "https://github.com/DazzleNodes/ComfyUI-DazzleKSampler"
 Repository = "https://github.com/DazzleNodes/ComfyUI-DazzleKSampler"
 Issues = "https://github.com/DazzleNodes/ComfyUI-DazzleKSampler/issues"
 
+# ComfyUI Registry metadata.
+# See: https://docs.comfy.org/registry/publishing
+[tool.comfy]
+PublisherId = "djdarcy"
+DisplayName = "Dazzle KSampler"
+Icon = ""
+
+# Publishing: Update version in this file and push to main branch
+# GitHub Actions will automatically publish to ComfyUI Registry
+
 [project.scripts]
 ComfyUI-DazzleKSampler = "ComfyUI_DazzleKSampler.cli:main"
 
