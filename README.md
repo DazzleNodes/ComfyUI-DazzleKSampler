@@ -20,12 +20,22 @@ Every Dazzle sampler node exposes a `latent_role` dropdown that controls how the
 | Role | Behavior |
 |------|----------|
 | `auto` *(default)* | Inspect the dict shape and dispatch automatically. Honors `use_as_noise=True` regardless of seed value. |
-| `noise` | Use the upstream tensor as noise; init slot zeroed. |
+| `noise` | Use the upstream tensor as the **initial** noise at sigma_max; init slot zeroed. Seed still drives per-step ancestral/SDE noise — set `eta=0` for full upstream-determinism. |
 | `latent_image` | Standard img2img: samples are the init, noise comes from the seed. |
-| `noise+latent_image` | Layered: noise from the upstream `noise` key, init from `samples`. |
+| `noise+latent_image` | Layered: noise from the upstream `noise` key, init from `samples`. Same per-step caveat as `noise`. |
 | `seed_driven` | True txt2img override: zero init, noise from seed. Ignores upstream flags. |
 
-The seed widget hides automatically when `latent_role` doesn't use it. `auto` is the right default for almost every workflow — explicit roles exist for power users and for diagnosing mismatches.
+`auto` is the right default for almost every workflow — explicit roles exist for power users and for diagnosing mismatches.
+
+### Determinism recipe — `eta = 0`
+
+`latent_role` controls only the **initial** noise tensor at sigma_max. The per-step ancestral/SDE injection during the trajectory is independent of `latent_role` and is always driven by the KSampler seed. To make output **fully** determined by SmartResCalc upstream noise (KSampler seed irrelevant), set `eta = 0` on DazzleKSampler. With `eta = 0`, the per-step injection collapses to zero and the seed becomes a dead input. *Empirically verified 2026-04-29: with `eta=0` and `latent_role=noise`, KSampler seeds 5225 / 9999 / -2 produce bit-identical output.*
+
+**Recommended pattern for single-seed workflows:** wire SmartResCalc's `seed` output to DazzleKSampler's `seed` input. One slider drives both nodes, and you keep the option of `eta>0` for additional shaped per-step variation. The first-step console banner reports the active configuration on every run.
+
+### Advanced: per-step noise spectrum *(v0.1.3-alpha)*
+
+DazzleKSampler exposes three optional noise-type widgets (`noise_type_init`, `noise_type_sde`, `noise_type_sde_substep`) — all default to `gaussian`, so leaving them alone preserves prior behavior. Non-gaussian choices (brown/pink, blue/violet, plasma/pyramid) shift the **spectral content** of the per-step noise budget, giving stylistic control independent of the prompt: smoother/painterly with low-frequency-dominant noise, grainier/sharper with high-frequency-dominant noise. See [`docs/wiki/Noise-Passthrough.md`](docs/wiki/Noise-Passthrough.md) for the full breakdown.
 
 ### Four-shape latent-dict protocol
 
@@ -110,7 +120,7 @@ Run tests via the manual harness — `pytest` collides with this project's local
 python tests/test_latent_noise_protocol.py
 ```
 
-The harness exits with code 1 on any failure, so CI is honest. All 35 cases cover shape detection, legacy `seed=-2` parity, the full 5×4 role × shape dispatch matrix, auto-mode + normal seed paths, protocol invariants, and defensive paths.
+The harness exits with code 1 on any failure, so CI is honest. All 36 cases cover shape detection, legacy `seed=-2` parity, the full 5×4 role × shape dispatch matrix, auto-mode + normal seed paths, protocol invariants, defensive paths, and the seed-plumbing contract (added in v0.1.3-alpha).
 
 ## Documentation
 

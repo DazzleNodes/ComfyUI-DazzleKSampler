@@ -92,7 +92,7 @@ class SharkSampler:
                 "noise_type_init": (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian"}),
                 "noise_stdev":     ("FLOAT",                      {"default": 1.0, "min": -10000.0, "max": 10000.0, "step":0.01, "round": False, }),
                 "noise_seed":      ("INT",                        {"default": 0,   "min": -2,       "max": 0xffffffffffffffff}),
-                "latent_role":     (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "How to interpret the input latent dict. 'auto' inspects dict shape (use_as_noise flag, presence of 'noise' key) and dispatches accordingly. 'noise' = use upstream's noise tensor (samples for Shape B, noise key for Shape C); init zeroed. 'latent_image' = use samples as init image, generate noise from seed. 'noise+latent_image' = use 'noise' key as noise + samples as init (Shape C only; falls back otherwise). 'seed_driven' = true txt2img: zero init AND generate noise from seed (distinct from latent_image, which preserves samples as img2img init). Mismatch warnings printed to console when explicit role does not match incoming dict shape. seed=-2 magic is deprecated under 'auto'."}),
+                "latent_role":     (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "How to interpret the input latent dict. 'auto' inspects dict shape (use_as_noise flag, presence of 'noise' key) and dispatches accordingly. 'noise' = use upstream's noise tensor (samples for Shape B, noise key for Shape C); init zeroed. 'latent_image' = use samples as init image, generate noise from seed. 'noise+latent_image' = use 'noise' key as noise + samples as init (Shape C only; falls back otherwise). 'seed_driven' = true txt2img: zero init AND generate noise from seed (distinct from latent_image, which preserves samples as img2img init). Mismatch warnings printed to console when explicit role does not match incoming dict shape. seed=-2 magic is deprecated under 'auto'. Note: latent_role controls only the initial noise tensor at sigma_max -- the seed still drives per-step ancestral/SDE noise injection regardless of role. Set eta=0 for output fully determined by upstream noise."}),
                 "sampler_mode":    (['unsample', 'standard', 'resample'], {"default": "standard"}),
                 "scheduler":       (get_res4lyf_scheduler_list(), {"default": "beta57"},),
                 "steps":           ("INT",                        {"default": 30,  "min": 1,        "max": 10000.0}),
@@ -571,6 +571,36 @@ class SharkSampler:
                             print(f"[DazzleKSampler] DEPRECATION: {_disp.deprecation}")
                         if _disp.warning:
                             print(f"[DazzleKSampler] WARNING: {_disp.warning}")
+
+                        # Structured noise-source banner: initial noise vs per-step
+                        # noise are independent stochastic budgets. The dispatcher's
+                        # `applied` value (not just latent_role) determines the
+                        # initial-noise source -- e.g. latent_role=auto can dispatch
+                        # to shape_b when the dict carries use_as_noise=True.
+                        if _disp.applied in ("shape_b", "shape_c"):
+                            # Initial noise comes from upstream tensor; per-step
+                            # always seed-driven.
+                            if noise_seed == -1:
+                                print(f"[DazzleKSampler] noise sources: initial=upstream tensor "
+                                      f"(latent_role={latent_role}, applied={_disp.applied}); "
+                                      f"per-step=random each run (seed=-1).")
+                            elif noise_seed == -2:
+                                print(f"[DazzleKSampler] noise sources: initial=upstream tensor "
+                                      f"(latent_role={latent_role}, applied={_disp.applied}); "
+                                      f"per-step=torch.initial_seed()+1 "
+                                      f"(seed=-2 is non-deterministic across sessions).")
+                            else:
+                                print(f"[DazzleKSampler] noise sources: initial=upstream tensor "
+                                      f"(latent_role={latent_role}, applied={_disp.applied}); "
+                                      f"per-step=seed {noise_seed} (deterministic). Set eta=0 "
+                                      f"to make output fully determined by upstream noise.")
+                        elif _disp.applied == "seed_driven":
+                            print(f"[DazzleKSampler] noise sources: initial=zeros; "
+                                  f"per-step + sample-noise=seed {noise_seed} (true txt2img).")
+                        else:  # shape_a -- img2img: x from samples, noise from seed
+                            print(f"[DazzleKSampler] noise sources: initial-noise+per-step driven by "
+                                  f"seed {noise_seed} (latent_role={latent_role}, "
+                                  f"applied={_disp.applied}).")
 
                     # Always honor the dispatch's x: it may be zeroed (Shape B,
                     # seed_driven), preserved as samples (Shape A, shape_c init),
@@ -1458,19 +1488,22 @@ class ClownsharKSampler_Beta:
                     "denoise":      ("FLOAT",                      {"default": 1.0, "min": -10000, "max": MAX_STEPS, "step":0.01}),
                     "cfg":          ("FLOAT",                      {"default": 5.5, "min": -100.0, "max": 100.0,     "step":0.01, "round": False, }),
                     "seed":         ("INT",                        {"default": 0,   "min": -2,     "max": 0xffffffffffffffff}),
-                    "latent_role":  (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "How to interpret the input latent dict. 'auto' inspects dict shape (use_as_noise flag, presence of 'noise' key) and dispatches accordingly. 'noise' = use upstream's noise tensor (samples for Shape B, noise key for Shape C); init zeroed. 'latent_image' = use samples as init image, generate noise from seed. 'noise+latent_image' = use 'noise' key as noise + samples as init (Shape C only; falls back otherwise). 'seed_driven' = true txt2img: zero init AND generate noise from seed (distinct from latent_image, which preserves samples as img2img init). Mismatch warnings printed to console when explicit role does not match incoming dict shape. seed=-2 magic is deprecated under 'auto'."}),
+                    "latent_role":  (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "How to interpret the input latent dict. 'auto' inspects dict shape (use_as_noise flag, presence of 'noise' key) and dispatches accordingly. 'noise' = use upstream's noise tensor (samples for Shape B, noise key for Shape C); init zeroed. 'latent_image' = use samples as init image, generate noise from seed. 'noise+latent_image' = use 'noise' key as noise + samples as init (Shape C only; falls back otherwise). 'seed_driven' = true txt2img: zero init AND generate noise from seed (distinct from latent_image, which preserves samples as img2img init). Mismatch warnings printed to console when explicit role does not match incoming dict shape. seed=-2 magic is deprecated under 'auto'. Note: latent_role controls only the initial noise tensor at sigma_max -- the seed still drives per-step ancestral/SDE noise injection regardless of role. Set eta=0 for output fully determined by upstream noise."}),
                     "sampler_mode": (['unsample', 'standard', 'resample'], {"default": "standard"}),
                     "bongmath":     ("BOOLEAN",                    {"default": True}),
+                    "noise_type_init":         (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian", "tooltip": "Advanced. Leave at gaussian for default behavior. Spectrum of the *initial* noise tensor at sigma_max (only consumed when latent_role generates noise from seed -- ignored when latent_role=noise/noise+latent_image because initial noise then comes from upstream). Brown/pink emphasize low frequencies (smoother/painterly), blue/violet emphasize high frequencies (grainier/sharper), plasma/pyramid produce fractal/structured patterns."}),
+                    "noise_type_sde":          (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian", "tooltip": "Advanced. Leave at gaussian for default behavior. Spectrum of the *per-step* ancestral/SDE noise injected at every sampler step (scaled by eta). Active for ALL latent_role values -- this is the dominant compositional noise budget under latent_role=noise. Same spectral choices as noise_type_init."}),
+                    "noise_type_sde_substep":  (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian", "tooltip": "Advanced. Leave at gaussian for default behavior. Spectrum of per-substep noise injection (only relevant for samplers that use multi-substep SDE, e.g. some RES4LYF RK variants). Most users can ignore this."}),
                     },
-                "optional": 
+                "optional":
                     {
                     "model":        ("MODEL",),
                     "positive":     ("CONDITIONING",),
                     "negative":     ("CONDITIONING",),
                     "latent_image": ("LATENT",),
-                    "sigmas":       ("SIGMAS",), 
-                    "guides":       ("GUIDES",), 
-                    "options":      ("OPTIONS", {}),   
+                    "sigmas":       ("SIGMAS",),
+                    "guides":       ("GUIDES",),
+                    "options":      ("OPTIONS", {}),
                     }
                 }
         
@@ -1503,19 +1536,20 @@ class ClownsharKSampler_Beta:
             steps_to_run                  : int                    = -1,
             bongmath                      : bool                   = True,
             sampler_mode                  : str                    = "standard",
-            
-            noise_type_sde                : str                    = "gaussian", 
-            noise_type_sde_substep        : str                    = "gaussian", 
+
+            noise_type_init               : str                    = "gaussian",
+            noise_type_sde                : str                    = "gaussian",
+            noise_type_sde_substep        : str                    = "gaussian",
             noise_mode_sde                : str                    = "hard",
             noise_mode_sde_substep        : str                    = "hard",
 
-            
-            overshoot_mode                : str                    = "hard", 
+
+            overshoot_mode                : str                    = "hard",
             overshoot_mode_substep        : str                    = "hard",
-            overshoot                     : float                  = 0.0, 
+            overshoot                     : float                  = 0.0,
             overshoot_substep             : float                  = 0.0,
-            
-            eta                           : float                  = 0.5, 
+
+            eta                           : float                  = 0.5,
             eta_substep                   : float                  = 0.5,
             momentum                      : float                  = 0.0,
             
@@ -1598,12 +1632,11 @@ class ClownsharKSampler_Beta:
         # defaults for ClownSampler
         eta_substep = eta
         
-        # defaults for SharkSampler
-        noise_type_init = "gaussian"
+        # defaults for SharkSampler (noise_type_init now driven by widget)
         noise_stdev     = 1.0
         denoise_alt     = 1.0
         channelwise_cfg = False
-        
+
         if denoise < 0:
             denoise_alt = -denoise
             denoise = 1.0

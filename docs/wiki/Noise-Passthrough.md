@@ -12,7 +12,7 @@ DazzleKSampler exposes a **`latent_role`** widget on every Dazzle sampler node t
 | **`noise+latent_image`** | Force Shape C path: `samples` is the init image; the `noise` key is the noise tensor. Falls back to Shape A with a warning if no `noise` key is present. |
 | **`seed_driven`** | True txt2img override: zero the init slot **and** generate noise from `seed`. Ignores upstream `samples` entirely (distinct from `latent_image`, which preserves `samples` as the img2img init). Useful for "what would this prompt produce from scratch?" comparisons. |
 
-The seed widget is auto-hidden when `latent_role ∈ {"noise", "noise+latent_image"}` because the seed is unused on those paths (the noise comes from upstream, not from PRNG).
+The seed widget remains visible regardless of `latent_role`. (Earlier v0.1.2-alpha builds tried to hide it under `noise` / `noise+latent_image` on the assumption that the seed was unused — that turned out to be wrong; see [What `latent_role` controls vs. doesn't](#what-latent_role-controls-vs-doesnt) below. The hide mechanism also conflicted with ComfyUI's widget→input conversion and was removed in v0.1.3-alpha; see [#12](https://github.com/DazzleNodes/ComfyUI-DazzleKSampler/issues/12).)
 
 ## The Four-Shape Latent-Dict Protocol
 
@@ -133,13 +133,67 @@ Pre-v0.1.1-alpha symptom of the dual-role bug — fixed by zeroing the init slot
 **Console shows "auto-mode dispatched to Shape B without seed=-2":**
 This is the v0.1.2 informational notice. It means `latent_role = auto` saw `use_as_noise=True` in the dict and dispatched accordingly without needing `-2`. To suppress, set `latent_role` explicitly.
 
-**Seed widget vanished:**
-Expected behavior when `latent_role ∈ {"noise", "noise+latent_image"}` — the seed is unused on those paths (noise comes from upstream). Switch to `auto`, `latent_image`, or `seed_driven` to bring it back.
+**Seed widget vanished after wiring an input to the seed socket:**
+Pre-v0.1.3-alpha bug ([#12](https://github.com/DazzleNodes/ComfyUI-DazzleKSampler/issues/12)). Fixed in v0.1.3 by removing the conditional hide-logic JS extension. If you still see this, upgrade.
 
 **Noise not being used:**
 Check that the upstream produces a Shape B or C latent. The `dimensions only` mode with non-trivial `fill_type` (e.g., `DazNoise:Brown`) produces Shape B; `img2img + img2noise` produces Shape C; everything else falls through to seed-driven noise.
+
+## What `latent_role` controls vs. doesn't
+
+`latent_role` controls the **initial noise tensor at sigma_max** only. The per-step ancestral / SDE / guide-inversion noise injection that fires at every step during the sampling trajectory is independent of `latent_role` and is always driven by the KSampler's `noise_seed`. The two stochastic budgets are independent:
+
+| Path | Source under `latent_role=noise` | Source under `latent_role=auto` (Shape A / D) |
+|------|----------------------------------|-----------------------------------------------|
+| Initial noise (at sigma_max) | Upstream tensor (Shape B `samples` or Shape C `noise`) | RNG seeded with `noise_seed` |
+| Per-step injection (during trajectory) | RNG seeded with `noise_seed`, scaled by `eta * super_sigma_up` | Same |
+
+This is why changing the KSampler seed under `latent_role=noise` *still* changes the output — even though the initial noise tensor came from upstream, the per-step noise sampler is reseeded by the KSampler seed and produces different per-step injections.
+
+## Determinism recipe — `eta = 0`
+
+For output **fully** determined by SmartResCalc upstream noise (KSampler seed effectively a dead input), set `eta = 0` on DazzleKSampler. With `eta = 0` and `noise_mode_sde="hard"` (the default), `super_sigma_up` collapses to 0, the per-step injection contribution becomes exactly zero, and the seed has no effect on output. *Empirically verified 2026-04-29 with QwenImage + SmartResCalc DazNoise:Plasma + spectral_blend=0.04, KSampler seeds 5225 / 9999 / -2 produce bit-identical output under eta=0.*
+
+## Advanced: per-step noise spectrum (v0.1.3-alpha)
+
+DazzleKSampler exposes three optional `noise_type_*` widgets that control the **frequency content** of the noise budgets independent of which seed feeds them:
+
+| Widget | What it shapes | When it's active |
+|--------|---------------|------------------|
+| `noise_type_init` | Initial noise tensor at sigma_max (only when generated from seed) | Ignored under `latent_role ∈ {noise, noise+latent_image}` (initial comes from upstream) |
+| `noise_type_sde` | Per-step ancestral/SDE noise injection | Active for **all** `latent_role` values; this is the dominant compositional budget when `eta > 0` |
+| `noise_type_sde_substep` | Per-substep noise (multi-substep RK samplers only) | Niche; most users can ignore |
+
+All default to `gaussian` so behavior is identical to pre-v0.1.3 unless you change them. Spectral choices:
+
+- **`brown` / `pink`** — low-frequency dominant. Smoother, more painterly result; less micro-grain.
+- **`blue` / `violet`** — high-frequency dominant. Sharper, grainier surface texture; finer detail.
+- **`plasma` / `pyramid_*`** — fractal / multi-scale structured. Self-similar patterns; can bias composition toward natural-looking forms.
+- **`fractal`** — configurable via `alpha_init`/`k_init` in extra_options.
+
+Pairs naturally with `latent_role=noise`: under that role, the upstream provides the *initial* canvas while `noise_type_sde` shapes the *per-step* texture being stirred in. This is the closest current path to "shaped noise everywhere."
+
+## Surprises / FAQ
+
+**Q: I changed the SmartResCalc seed and got only a minor variation, but changing the KSampler seed produced a completely different scene. Isn't that backwards?**
+
+A: It is, and it's because of how `blend_strength` scales the shaped-noise contribution. With `blend_strength=0.04`, only ~4% of the initial latent is the shaped pattern; the other ~96% is plain Gaussian noise. Meanwhile per-step noise at high sigmas can be substantial (scaled by `super_sigma_up`). Net result: visible variation is dominated by the per-step path, which is driven by the KSampler seed. To make shaped noise dominate composition, raise `blend_strength` (try 0.5+), set `eta=0` to suppress per-step noise entirely, or wire SmartResCalc's `seed` output to DazzleKSampler's `seed` input so one slider drives both budgets coherently.
+
+**Q: How do I tell at runtime which noise sources are active for this run?**
+
+A: As of v0.1.3-alpha, DazzleKSampler emits a structured noise-source banner at the first step of every generation. Example:
+
+```
+[DazzleKSampler] noise sources: initial=upstream tensor (latent_role=noise);
+per-step=seed 5225 (deterministic). Set eta=0 to make output fully determined
+by upstream noise.
+```
+
+The banner reports the configuration for each of the five role/seed cases (auto, latent_image, seed_driven, noise+seed≥0, noise+seed=-2, noise+seed=-1) so the active state is self-documenting.
 
 ## Status of related issues
 
 - **Issue #10** (smart latent input detection) — subsumed by Issue #11 / v0.1.2-alpha. The `latent_role = auto` mode now infers dispatch from the dict shape regardless of seed.
 - **Issue #11** (explicit `latent_role` widget) — implemented in v0.1.2-alpha.
+- **Issue #12** (seed widget disappears after wiring + widget change) — fixed in v0.1.3-alpha.
+- **Issue #13** (expose all noise types as widgets) — Phase 1+2 (`noise_type_init`, `noise_type_sde`, `noise_type_sde_substep`) implemented in v0.1.3-alpha. Per-noise-type alpha/k/scale params remain deferred.

@@ -6,6 +6,72 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.3-alpha] - 2026-04-29
+
+### Fixed
+- **[#12](https://github.com/DazzleNodes/ComfyUI-DazzleKSampler/issues/12)** —
+  Seed widget permanently disappeared after wiring an input to the seed socket
+  and then changing any other widget value. The hide-logic JS extension
+  introduced in v0.1.2-alpha (`web/dazzle_ksampler.js`) mutated `widget.type`
+  and `widget.computeSize` in ways that conflicted with ComfyUI's
+  widget→input conversion machinery. Fixed by removing the hide logic
+  entirely; the seed widget now stays visible regardless of `latent_role`.
+- **Misleading documentation in v0.1.2-alpha** — README, wiki, tooltips, and
+  CHANGELOG claimed the seed widget was "unused" under
+  `latent_role ∈ {noise, noise+latent_image}`. The seed *is* still used:
+  it independently feeds `init_noise_samplers` in
+  `py/beta/rk_noise_sampler_beta.py:135-160`, which instantiates the
+  per-step ancestral / SDE noise sampler. That sampler is called at every
+  step (`super_sigma_up * NS.noise_sampler(...)`), so changing the seed
+  changes per-step injection even when the initial noise tensor comes from
+  upstream. Tooltips, README, and wiki language corrected.
+
+### Changed
+- The conditional seed-widget-hiding JS extension has been replaced with an
+  empty registration shell. The hide rule was based on a wrong premise
+  (per-step noise machinery still consumes the seed), and the mechanism
+  itself was incompatible with widget→input conversion. The shell is
+  preserved so future frontend-only enhancements have a stable import path.
+- `latent_role` widget tooltip and `noise_seed` tooltip on every sampler
+  node now state explicitly that `latent_role` controls only the *initial*
+  noise tensor at sigma_max, and that the seed still drives per-step noise
+  injection regardless of role.
+
+### Added
+- **Structured first-step noise-source banner.** Every generation prints a
+  banner identifying the active noise-source configuration. Five variants
+  cover the common cases: `auto`/`latent_image`, `seed_driven`, and three
+  sub-cases for `noise`/`noise+latent_image` (seed=-1, seed=-2, and
+  deterministic `seed≥0` — the latter recommends `eta=0` for full
+  upstream-determinism).
+- **"Determinism recipe" subsection** in README and wiki: with `eta=0`
+  (collapses `super_sigma_up` to 0 under the default `noise_mode_sde="hard"`)
+  and `latent_role=noise`, output is fully determined by the upstream
+  noise tensor. Empirically verified 2026-04-29: KSampler seeds 5225, 9999,
+  and -2 all produce bit-identical output under `eta=0`.
+- **"Surprises / FAQ" section** in `docs/wiki/Noise-Passthrough.md`
+  documenting why per-step noise often dominates visible variation when
+  `blend_strength` is low (the shaped pattern only contributes a small
+  fraction of the initial latent), and recommending the
+  SmartResCalc.seed → DazzleKSampler.seed wiring pattern as a coherent
+  single-knob workflow.
+- **`noise_type_init`, `noise_type_sde`, `noise_type_sde_substep` widgets
+  on DazzleKSampler** ([#13](https://github.com/DazzleNodes/ComfyUI-DazzleKSampler/issues/13)
+  Phase 1+2). Lets users select the spectral content of the initial-noise
+  budget and the per-step ancestral/SDE budget independently:
+  brown/pink (low-frequency dominant), blue/violet (high-frequency
+  dominant), plasma/pyramid_*/fractal (structured / multi-scale), and the
+  default `gaussian`. All default to `gaussian` so behavior is identical
+  to v0.1.2 unless the widgets are changed. Tooltips lead with
+  *"Advanced. Leave at gaussian for default behavior."* and the widgets
+  are positioned at the bottom of the required block to visually
+  deprioritize them. Per-noise-type alpha/k/scale params remain deferred.
+- **Regression test `test_seed_passes_through_dispatch_unchanged`** in
+  `tests/test_latent_noise_protocol.py` pinning the seed-plumbing
+  contract: the dispatch helper does not zero, override, or transform
+  `noise_seed` for any role. Per-step machinery downstream depends on
+  receiving the seed verbatim. Test count: 35 → 36.
+
 ## [0.1.2-alpha] - 2026-04-28
 
 ### Added

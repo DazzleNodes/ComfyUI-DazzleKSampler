@@ -1,95 +1,44 @@
 /**
- * DazzleKSampler -- conditional seed-widget visibility.
+ * DazzleKSampler -- frontend extension shell.
  *
- * When latent_role indicates the seed will not be used (Shape B / C dispatch
- * paths consume an upstream noise tensor instead), collapse the seed widget
- * so the user is not misled into thinking it controls the result.
+ * v0.1.3-alpha: the conditional seed-widget hiding logic that lived here in
+ * v0.1.2-alpha has been removed. Two reasons:
  *
- * Roles that hide the seed widget:
- *     "noise"              -- samples used as noise (Shape B); seed unused.
- *     "noise+latent_image" -- "noise" key used as noise (Shape C); seed unused.
+ *   1. The hide rule was based on a wrong premise. The original comment said
+ *      "samples used as noise (Shape B); seed unused" -- but the seed is NOT
+ *      unused. It still drives the per-step ancestral / SDE / guide-inversion
+ *      noise sampler via `init_noise_samplers` in
+ *      `py/beta/rk_noise_sampler_beta.py:135-160`. Hiding the seed widget
+ *      misled users into believing the value was irrelevant when it actually
+ *      drove visible per-step variation.
  *
- * Roles that show the seed widget (default visible):
- *     "auto"               -- may dispatch any shape; show seed because
- *                             auto+SHAPE_A still uses the seed.
- *     "latent_image"       -- seed drives noise generation.
- *     "seed_driven"        -- seed drives noise generation (force-override).
+ *   2. The hide mechanism (mutating widget.type / widget.computeSize)
+ *      conflicted with ComfyUI's native widget->input conversion. When a wire
+ *      was connected to the seed input AND any other widget value was
+ *      changed, the seed widget vanished permanently. Recovery required
+ *      deleting and recreating the node. Filed as #12.
  *
- * Dispatch-aware nodes that own a "seed" widget (this extension targets):
- *     DazzleKSampler, DazzleSharkSampler, DazzleBongSampler, DazzleTauSampler
+ * The fix for both issues converges on the same change: stop hiding the
+ * widget. The user-facing communication of "seed still matters" now lives in
+ * the structured first-step console banner (samplers.py dispatch site), the
+ * latent_role tooltip text, and the README / wiki / CHANGELOG.
  *
- * Nodes intentionally NOT targeted:
- *     DazzleKSampler_Chain    -- no seed widget (threaded internally).
- *     DazzleKSampler_Advanced -- advisory node, returns SAMPLER; latent_role
- *                                here is informational only and the seed is
- *                                still used by the downstream consumer.
- *     DazzleClownSampler      -- advisory node, same reasoning.
+ * For full context see:
+ *   private/claude/2026-04-29__13-04-30__seed-still-affects-output-under-latent-role-noise.md
+ *
+ * The extension shell is preserved (registration still fires) so future
+ * frontend-only enhancements have a stable import path. If/when we add a
+ * `lock_to_upstream` widget (#TBD) that genuinely makes the seed unused, we
+ * may revisit hide logic -- but with a safer mechanism that doesn't mutate
+ * widget state behind ComfyUI's back.
  */
 
 import { app } from "../../scripts/app.js";
 
-const DISPATCH_AWARE_NODES = new Set([
-    "DazzleKSampler",
-    "DazzleSharkSampler",
-    "DazzleBongSampler",
-    "DazzleTauSampler",
-]);
-
-const SEED_UNUSED_ROLES = new Set(["noise", "noise+latent_image"]);
-
-
-function setWidgetHidden(widget, hidden) {
-    if (!widget) return;
-    if (hidden) {
-        if (widget.origType === undefined) {
-            widget.origType = widget.type;
-        }
-        widget.type = "hidden";
-        widget.computeSize = () => [0, -4];
-    } else {
-        if (widget.origType !== undefined) {
-            widget.type = widget.origType;
-        }
-        widget.computeSize = null;
-    }
-}
-
-
-function syncSeedVisibility(node, roleWidget, seedWidget) {
-    const role = roleWidget?.value ?? "auto";
-    const hide = SEED_UNUSED_ROLES.has(role);
-    setWidgetHidden(seedWidget, hide);
-    // Preserve user-resized width; auto-fit height only. Calling
-    // setSize(computeSize()) would clamp width back to the minimum,
-    // collapsing nodes the user had widened (same bug Smart-Res-Calc hit).
-    if (node.computeSize) {
-        const computed = node.computeSize();
-        const currentWidth = (node.size && node.size[0]) || computed[0];
-        node.setSize([currentWidth, computed[1]]);
-    }
-    node.setDirtyCanvas?.(true, true);
-}
-
 
 app.registerExtension({
-    name: "DazzleKSampler.ConditionalSeedWidget",
+    name: "DazzleKSampler.FrontendShell",
 
-    nodeCreated(node) {
-        if (!DISPATCH_AWARE_NODES.has(node.comfyClass)) return;
-
-        const roleWidget = node.widgets?.find(w => w.name === "latent_role");
-        const seedWidget = node.widgets?.find(w => w.name === "seed");
-        if (!roleWidget || !seedWidget) return;
-
-        // Chain into any existing callback so we don't clobber other extensions.
-        const prevCallback = roleWidget.callback;
-        roleWidget.callback = function (value) {
-            const result = prevCallback ? prevCallback.apply(this, arguments) : undefined;
-            syncSeedVisibility(node, roleWidget, seedWidget);
-            return result;
-        };
-
-        // Apply on workflow load / node creation so saved-state nodes start correct.
-        syncSeedVisibility(node, roleWidget, seedWidget);
-    },
+    // Intentionally empty: no nodeCreated logic in v0.1.3-alpha.
+    // Future widget orchestration can hook in here.
 });

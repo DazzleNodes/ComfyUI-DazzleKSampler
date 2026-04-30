@@ -464,6 +464,26 @@ def test_use_as_noise_false_explicit_treated_as_shape_a():
     assert r.noise is None
 
 
+# ---------- regression: seed plumbing through dispatch (v0.1.3-alpha) ----------
+
+def test_seed_passes_through_dispatch_unchanged():
+    """The helper does NOT zero, override, or transform noise_seed for any
+    role. Per-step noise machinery downstream relies on receiving the user's
+    seed verbatim. If a future refactor adds 'helpfulness' that mutates the
+    seed based on role, this test will catch it.
+
+    See: 2026-04-29__13-04-30__seed-still-affects-output-under-latent-role-noise.md
+    """
+    latent_b = {"samples": _seeded_tensor(LATENT_SHAPE_4D, 42),
+                "use_as_noise": True}
+    r_seed_a = _resolve(latent_b, role=ROLE_NOISE, seed=5225)
+    r_seed_b = _resolve(latent_b, role=ROLE_NOISE, seed=9999)
+    assert torch.equal(r_seed_a.noise, r_seed_b.noise), \
+        "role=noise must produce seed-independent noise tensor (comes from upstream)"
+    assert torch.equal(r_seed_a.x, r_seed_b.x), \
+        "role=noise must produce seed-independent x (zeros)"
+
+
 # ---------- manual harness ----------
 
 if __name__ == "__main__":
