@@ -26,6 +26,7 @@ from ._latent_noise_protocol import resolve_latent_as_noise
 
 from .constants             import MAX_STEPS, IMPLICIT_TYPE_NAMES
 from .noise_classes         import NOISE_GENERATOR_CLASSES_SIMPLE, NOISE_GENERATOR_NAMES_SIMPLE, NOISE_GENERATOR_NAMES
+from .daznoise_adapter      import get_noise_choices, resolve_noise_class
 from .rk_noise_sampler_beta import NOISE_MODE_NAMES
 from .rk_coefficients_beta  import get_default_sampler_name, get_sampler_name_list, process_sampler_name
 
@@ -89,7 +90,7 @@ class SharkSampler:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "noise_type_init": (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian"}),
+                "noise_type_init": (get_noise_choices(NOISE_GENERATOR_NAMES_SIMPLE), {"default": "gaussian"}),
                 "noise_stdev":     ("FLOAT",                      {"default": 1.0, "min": -10000.0, "max": 10000.0, "step":0.01, "round": False, }),
                 "noise_seed":      ("INT",                        {"default": 0,   "min": -2,       "max": 0xffffffffffffffff}),
                 "latent_role":     (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "How to interpret the input latent dict. 'auto' inspects dict shape (use_as_noise flag, presence of 'noise' key) and dispatches accordingly. 'noise' = use upstream's noise tensor (samples for Shape B, noise key for Shape C); init zeroed. 'latent_image' = use samples as init image, generate noise from seed. 'noise+latent_image' = use 'noise' key as noise + samples as init (Shape C only; falls back otherwise). 'seed_driven' = true txt2img: zero init AND generate noise from seed (distinct from latent_image, which preserves samples as img2img init). Mismatch warnings printed to console when explicit role does not match incoming dict shape. seed=-2 magic is deprecated under 'auto'. Note: latent_role controls only the initial noise tensor at sigma_max -- the seed still drives per-step ancestral/SDE noise injection regardless of role. Set eta=0 for output fully determined by upstream noise."}),
@@ -619,9 +620,14 @@ class SharkSampler:
                         noise = torch.zeros_like(x)
                     else:
                         RESplain("Initial latent noise seed: ", seed, debug=True)
-                        
-                        noise_sampler_init = NOISE_GENERATOR_CLASSES_SIMPLE.get(noise_type_init)(x=x, seed=seed, sigma_max=sigma_max, sigma_min=sigma_min)
-                    
+
+                        noise_init_cls = resolve_noise_class(noise_type_init, NOISE_GENERATOR_CLASSES_SIMPLE)
+                        if noise_init_cls is None:
+                            raise ValueError(
+                                f"Unknown noise_type_init: {noise_type_init!r}. "
+                                f"If this is a DazNoise:* type, ensure dazzle-comfy-plasma-fast is installed.")
+                        noise_sampler_init = noise_init_cls(x=x, seed=seed, sigma_max=sigma_max, sigma_min=sigma_min)
+
                         if noise_type_init == "fractal":
                             noise_sampler_init.alpha = alpha_init
                             noise_sampler_init.k     = k_init
@@ -1491,12 +1497,21 @@ class ClownsharKSampler_Beta:
                     "latent_role":  (["auto", "noise", "latent_image", "noise+latent_image", "seed_driven"], {"default": "auto", "tooltip": "How to interpret the input latent dict. 'auto' inspects dict shape (use_as_noise flag, presence of 'noise' key) and dispatches accordingly. 'noise' = use upstream's noise tensor (samples for Shape B, noise key for Shape C); init zeroed. 'latent_image' = use samples as init image, generate noise from seed. 'noise+latent_image' = use 'noise' key as noise + samples as init (Shape C only; falls back otherwise). 'seed_driven' = true txt2img: zero init AND generate noise from seed (distinct from latent_image, which preserves samples as img2img init). Mismatch warnings printed to console when explicit role does not match incoming dict shape. seed=-2 magic is deprecated under 'auto'. Note: latent_role controls only the initial noise tensor at sigma_max -- the seed still drives per-step ancestral/SDE noise injection regardless of role. Set eta=0 for output fully determined by upstream noise."}),
                     "sampler_mode": (['unsample', 'standard', 'resample'], {"default": "standard"}),
                     "bongmath":     ("BOOLEAN",                    {"default": True}),
-                    "noise_type_init":         (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian", "tooltip": "Advanced. Leave at gaussian for default behavior. Spectrum of the *initial* noise tensor at sigma_max (only consumed when latent_role generates noise from seed -- ignored when latent_role=noise/noise+latent_image because initial noise then comes from upstream). Brown/pink emphasize low frequencies (smoother/painterly), blue/violet emphasize high frequencies (grainier/sharper), plasma/pyramid produce fractal/structured patterns."}),
-                    "noise_type_sde":          (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian", "tooltip": "Advanced. Leave at gaussian for default behavior. Spectrum of the *per-step* ancestral/SDE noise injected at every sampler step (scaled by eta). Active for ALL latent_role values -- this is the dominant compositional noise budget under latent_role=noise. Same spectral choices as noise_type_init."}),
-                    "noise_type_sde_substep":  (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian", "tooltip": "Advanced. Leave at gaussian for default behavior. Spectrum of per-substep noise injection (only relevant for samplers that use multi-substep SDE, e.g. some RES4LYF RK variants). Most users can ignore this."}),
+                    "noise_all":               (("custom",) + tuple(get_noise_choices(NOISE_GENERATOR_NAMES_SIMPLE)), {"default": "gaussian", "tooltip": "Master noise selector. When set to anything other than 'custom', overrides all three noise_type_* widgets below with this value (the sub-widgets are auto-hidden by the JS extension). Set to 'custom' to expose noise_type_init, noise_type_sde, and noise_type_sde_substep for independent configuration. DazNoise:* options appear when dazzle-comfy-plasma-fast is installed."}),
                     },
                 "optional":
                     {
+                    # noise_type_* widgets are 'optional' so the JS hide/show
+                    # (splice in/out of node.widgets) doesn't break prompt
+                    # validation. When noise_all != 'custom', the JS removes
+                    # them from the widgets array; ComfyUI then omits them
+                    # from widgets_values, and the backend would reject the
+                    # prompt if these were 'required'. Defaults below match
+                    # the function-signature defaults in main(), so behavior
+                    # is unchanged when the values are absent.
+                    "noise_type_init":         (get_noise_choices(NOISE_GENERATOR_NAMES_SIMPLE), {"default": "gaussian", "tooltip": "Advanced. Leave at gaussian for default behavior. Spectrum of the *initial* noise tensor at sigma_max (only consumed when latent_role generates noise from seed -- ignored when latent_role=noise/noise+latent_image because initial noise then comes from upstream). Brown/pink emphasize low frequencies (smoother/painterly), blue/violet emphasize high frequencies (grainier/sharper), plasma/pyramid produce fractal/structured patterns. DazNoise:* options (Plasma/Pink/Brown/Greyscale/Gaussian) appear when dazzle-comfy-plasma-fast is installed -- they shape the initial canvas the model imagines into; for clean composition use SmartResCalc upstream with spectral_blend instead, since these are raw structured noise."}),
+                    "noise_type_sde":          (get_noise_choices(NOISE_GENERATOR_NAMES_SIMPLE), {"default": "gaussian", "tooltip": "Advanced. Leave at gaussian for default behavior. Spectrum of the *per-step* ancestral/SDE noise injected at every sampler step (scaled by eta). Active for ALL latent_role values -- this is the dominant compositional noise budget under latent_role=noise. Same spectral choices as noise_type_init. Caveat: highly structured noise types (raw plasma, brown, pyramid) produce visual artifacts (chromatic fringing, halftoning) when used as per-step injection because the diffusion model expects ~unit-variance Gaussian statistics; for shaped per-step noise without artifacts, use SmartResCalc upstream with spectral_blend and latent_role=noise. DazNoise:Gaussian is safe (true Gaussian)."}),
+                    "noise_type_sde_substep":  (get_noise_choices(NOISE_GENERATOR_NAMES_SIMPLE), {"default": "gaussian", "tooltip": "Advanced. Leave at gaussian for default behavior. Spectrum of per-substep noise injection (only relevant for samplers that use multi-substep SDE, e.g. some RES4LYF RK variants). Same caveat as noise_type_sde for highly structured types."}),
                     "model":        ("MODEL",),
                     "positive":     ("CONDITIONING",),
                     "negative":     ("CONDITIONING",),
@@ -1537,6 +1552,7 @@ class ClownsharKSampler_Beta:
             bongmath                      : bool                   = True,
             sampler_mode                  : str                    = "standard",
 
+            noise_all                     : str                    = "gaussian",
             noise_type_init               : str                    = "gaussian",
             noise_type_sde                : str                    = "gaussian",
             noise_type_sde_substep        : str                    = "gaussian",
@@ -1636,6 +1652,16 @@ class ClownsharKSampler_Beta:
         noise_stdev     = 1.0
         denoise_alt     = 1.0
         channelwise_cfg = False
+
+        # noise_all master selector: when set to anything other than
+        # 'custom', force the three sub-widgets to its value. The JS
+        # extension hides the sub-widgets in this case, but we sync
+        # values defensively in case the JS state is out of sync (e.g.
+        # workflow loaded without our JS, or noise_all is wired as input).
+        if noise_all != "custom":
+            noise_type_init        = noise_all
+            noise_type_sde         = noise_all
+            noise_type_sde_substep = noise_all
 
         if denoise < 0:
             denoise_alt = -denoise

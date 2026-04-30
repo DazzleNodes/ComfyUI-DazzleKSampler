@@ -9,8 +9,9 @@ if TYPE_CHECKING:
 import comfy.model_patcher
 import comfy.supported_models
 
-from .noise_classes import NOISE_GENERATOR_CLASSES, NOISE_GENERATOR_CLASSES_SIMPLE
-from .constants     import MAX_STEPS
+from .noise_classes    import NOISE_GENERATOR_CLASSES, NOISE_GENERATOR_CLASSES_SIMPLE
+from .daznoise_adapter import resolve_noise_class
+from .constants        import MAX_STEPS
 
 from ..helper       import ExtraOptions, has_nested_attr 
 from ..latents      import normalize_zscore, get_orthogonal, get_collinear
@@ -156,8 +157,17 @@ class RK_NoiseSampler:
             self.noise_sampler2.k     = k2
             self.noise_sampler2.scale = scale2
         else:
-            self.noise_sampler  = NOISE_GENERATOR_CLASSES_SIMPLE.get(noise_sampler_type )(x=x, seed=seed,               sigma_min=self.sigma_min, sigma_max=self.sigma_max)
-            self.noise_sampler2 = NOISE_GENERATOR_CLASSES_SIMPLE.get(noise_sampler_type2)(x=x, seed=noise_seed_substep, sigma_min=self.sigma_min, sigma_max=self.sigma_max)
+            # resolve_noise_class() handles both native RES4LYF types and
+            # DazNoise:* types (via the adapter wrapper). Falls back to
+            # NOISE_GENERATOR_CLASSES_SIMPLE.get() for native types.
+            ns_cls  = resolve_noise_class(noise_sampler_type,  NOISE_GENERATOR_CLASSES_SIMPLE)
+            ns2_cls = resolve_noise_class(noise_sampler_type2, NOISE_GENERATOR_CLASSES_SIMPLE)
+            if ns_cls is None:
+                raise ValueError(f"Unknown noise_sampler_type: {noise_sampler_type!r}")
+            if ns2_cls is None:
+                raise ValueError(f"Unknown noise_sampler_type2: {noise_sampler_type2!r}")
+            self.noise_sampler  = ns_cls (x=x, seed=seed,               sigma_min=self.sigma_min, sigma_max=self.sigma_max)
+            self.noise_sampler2 = ns2_cls(x=x, seed=noise_seed_substep, sigma_min=self.sigma_min, sigma_max=self.sigma_max)
             
         if last_rng is not None:
             self.noise_sampler .generator.set_state(last_rng)

@@ -6,6 +6,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.4-alpha] - 2026-04-30
+
+### Added
+- **DazNoise integration** — `noise_type_init`, `noise_type_sde`, and
+  `noise_type_sde_substep` dropdowns on `DazzleKSampler` (and
+  `noise_type_init` on `SharkSampler`) now include the DazNoise palette
+  (`DazNoise: Plasma / Pink / Brown / Greyscale / Gaussian`) when the
+  `dazzle-comfy-plasma-fast` package is installed. Detection mirrors the
+  pattern SmartResCalc uses: a `sys.modules` walk for `JDC_OmniNoise` plus a
+  `folder_paths` custom-nodes fallback, both gated try/except so DazNoise
+  remains a soft dependency.
+- **`noise_all` master selector** on `DazzleKSampler` — a top-of-noise-group
+  combo that drives all three `noise_type_*` sub-widgets. When set to any
+  value other than `custom`, the three sub-widgets are hidden from the UI
+  via splice-based widget-array manipulation in `web/dazzle_ksampler.js`,
+  and their values are force-synced server-side (defense in depth: works
+  even if the JS is bypassed or the noise_all socket is wired as input).
+  Default is `gaussian`, preserving v0.1.3-alpha output for users who do
+  not touch the new widget. Selecting `custom` reveals the three sub-widgets
+  with their last-edited values.
+- **`daznoise_adapter.py`** — new module wrapping DazNoise's RGB image
+  generators (which produce `(1, H, W, 3)` tensors in [0,1]) in the
+  RES4LYF `NoiseGenerator` interface (`(B, C, H, W)` ~unit-variance
+  Gaussian). Adapter pipeline: generate RGB → mean across channels →
+  broadcast to latent channels → normalize to mean=0, std=1. On generator
+  failure the adapter falls back to `torch.randn_like(x)` rather than
+  crashing the sampler.
+- **`tests/test_daznoise_adapter.py`** — 11 tests covering detection-absent
+  (returns base RES4LYF list unchanged), detection-present (DazNoise types
+  appended, factory returned for resolve), adapter behavior (4D + 5D latent
+  shapes produce normalized noise, seed determinism), and failure fallback.
+
+### Changed
+- `noise_type_sde` and `noise_type_sde_substep` tooltips now flag that
+  highly structured noise types (raw plasma, brown, pyramid) produce visual
+  artifacts (chromatic fringing, halftoning) when used as per-step
+  injection because the diffusion model expects ~unit-variance Gaussian
+  statistics. Suggests SmartResCalc upstream + spectral_blend +
+  `latent_role=noise` for shaped per-step noise without artifacts.
+  `DazNoise: Gaussian` is called out as safe.
+- `py/beta/rk_noise_sampler_beta.py:159-160` — SDE dispatch now uses
+  `resolve_noise_class()` instead of a direct `NOISE_GENERATOR_CLASSES_SIMPLE`
+  lookup, so DazNoise types resolve correctly when selected for per-step
+  injection. Includes explicit `ValueError` on unknown types.
+
+### Notes
+- v0.1.3-alpha workflows load with `noise_all` defaulting to `gaussian`,
+  which forces the three sub-widgets to `gaussian` and hides them. To
+  recover v0.1.3-alpha widget exposure (independent control of each
+  sub-widget), set `noise_all = custom`.
+- DazNoise types are exposed on all three noise sub-widgets even though
+  most of them produce per-step artifacts when used outside `noise_type_init`.
+  This is intentional for the alpha — experimentation is the point. The
+  tooltips warn; the per-step-noise whitelist proposed in #14 Phase 5 is
+  deferred.
+
 ## [0.1.3-alpha] - 2026-04-29
 
 ### Fixed
